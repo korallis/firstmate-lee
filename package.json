@@ -1,0 +1,16 @@
+{
+  "name": "firstmate-tooling",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Node.js dependencies for firstmate's bin/ tooling (the Cursor SDK bridge now, the MCP server later).",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "test:cursor-bridge": "tests/fm-cursor-bridge.test.sh"
+  },
+  "dependencies": {
+    "@cursor/sdk": "1.0.23"
+  }
+}

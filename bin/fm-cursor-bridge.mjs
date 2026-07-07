@@ -507,37 +507,66 @@ async function loadSdk(opts, dryRun) {
   /** @type {{Agent: Record<string, Function>}} */
   let mod;
   try {
-    // eslint-disable-next-line import/no-unresolved
     mod = /** @type {{Agent: Record<string, Function>}} */ (await import('@cursor/sdk'));
-  } catch {
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
     runtimeError(
-      '@cursor/sdk is not installed. It is not yet a firstmate dependency (no package.json); '
-        + 'run with --dry-run for offline verification, or install @cursor/sdk once dependency '
-        + 'management is decided. See docs/cursor-sdk-backend.md.',
+      `@cursor/sdk could not be loaded (${detail}). Install firstmate's Node dependencies `
+        + '(run `npm install` at the repo root), or use --dry-run for offline verification. '
+        + 'See docs/cursor-sdk-backend.md.',
     );
   }
   const Agent = mod.Agent;
-  const routing = () => ('cwd' in opts && opts.cwd ? { cwd: path.resolve(opts.cwd) } : {});
+  const defaultCwd = 'cwd' in opts && opts.cwd ? path.resolve(opts.cwd) : undefined;
+
+  /**
+   * Resolve the effective runtime for a call from its routing hint, falling
+   * back to the invocation's runtime.
+   * @param {{runtime?: Runtime}} [o]
+   * @returns {boolean}
+   */
+  const isCloud = (o) => (o?.runtime ?? opts.runtime) === 'cloud';
+  /**
+   * @param {{cwd?: string}} [o]
+   * @returns {string|undefined}
+   */
+  const localCwd = (o) => o?.cwd ?? defaultCwd;
+  /**
+   * Options for get/listRuns/archive/delete: top-level cwd for local routing,
+   * empty for cloud (which routes by apiKey from CURSOR_API_KEY).
+   * @param {{cwd?: string, runtime?: Runtime}} [o]
+   * @returns {{cwd?: string}}
+   */
+  const opOptions = (o) => (isCloud(o) ? {} : { cwd: localCwd(o) });
+  /**
+   * Options for resume: cwd is nested under `local` (Partial<AgentOptions>).
+   * @param {{cwd?: string, runtime?: Runtime}} [o]
+   * @returns {{local?: {cwd?: string}}}
+   */
+  const resumeOptions = (o) => (isCloud(o) ? {} : { local: { cwd: localCwd(o) } });
+
   return {
     create: (o) => /** @type {Promise<SdkAgent>} */ (Agent.create(o)),
-    resume: (agentId, o) => /** @type {Promise<SdkAgent>} */ (Agent.resume(agentId, o ?? {})),
-    get: (agentId, o) => /** @type {Promise<SdkAgentInfo>} */ (Agent.get(agentId, o ?? routing())),
+    resume: (agentId, o) => /** @type {Promise<SdkAgent>} */ (Agent.resume(agentId, resumeOptions(o))),
+    get: (agentId, o) => /** @type {Promise<SdkAgentInfo>} */ (Agent.get(agentId, opOptions(o))),
     conversationOf: async (agentId, o) => {
-      // Reattach and read the most recent run's conversation turns.
-      const agent = /** @type {SdkAgent & {send: Function}} */ (await Agent.resume(agentId, o ?? routing()));
-      const runs = /** @type {{items: SdkRun[]}} */ (
-        await Agent.listRuns(agentId, { runtime: opts.runtime === 'cloud' ? 'cloud' : 'local', ...routing() })
-      );
+      // Read the most recent run's conversation turns without opening a new
+      // agent handle: listRuns is enough, and the run exposes conversation().
+      const listOptions = isCloud(o)
+        ? { runtime: 'cloud' }
+        : { runtime: 'local', cwd: localCwd(o) };
+      /** @typedef {{conversation?: () => Promise<unknown[]>, supports?: (op: string) => boolean}} ReadableRun */
+      const runs = /** @type {{items?: ReadableRun[]}} */ (await Agent.listRuns(agentId, listOptions));
       const latest = runs.items?.[0];
-      agent.close();
       if (!latest || typeof latest.conversation !== 'function') return [];
-      const turns = /** @type {{type:string, message?:{content?:{type:string,text?:string}[]}, text?:string}[]} */ (
+      if (typeof latest.supports === 'function' && !latest.supports('conversation')) return [];
+      const turns = /** @type {{type?:string, message?:{content?:{type:string,text?:string}[]}, text?:string, role?:string}[]} */ (
         await latest.conversation()
       );
       return turns.map(normalizeTurn);
     },
-    archive: (agentId, o) => /** @type {Promise<void>} */ (Agent.archive(agentId, o ?? routing())),
-    delete: (agentId, o) => /** @type {Promise<void>} */ (Agent.delete(agentId, o ?? routing())),
+    archive: (agentId, o) => /** @type {Promise<void>} */ (Agent.archive(agentId, opOptions(o))),
+    delete: (agentId, o) => /** @type {Promise<void>} */ (Agent.delete(agentId, opOptions(o))),
   };
 }
 

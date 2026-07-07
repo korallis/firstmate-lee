@@ -55,15 +55,19 @@ The fake persists agent state to a sidecar JSON file (default under the process 
 
 ## Dependency note
 
-`@cursor/sdk` is imported lazily and only on the live (non-dry-run) path, so the dry-run path and the test suite never require it to be installed.
-At the time this bridge landed, the firstmate repo had no `package.json` or Node dependency-management scheme for its `bin/` tooling, and inventing one is a repo-convention decision for the captain, not the crewmate.
-Until that decision is made and `@cursor/sdk` is installed, the live path fails with a clean JSON error pointing here; the dry-run path is fully functional.
-Track T3 should not wire `cursor-sdk` into `FM_BACKEND_KNOWN` / `FM_BACKEND_SPAWN` for live use until the dependency is installed and a live smoke (create -> send -> read -> kill against a real agent, with status landing in `state/<id>.status`) is recorded here with date, version, exact commands, and exact output, per the backend-verification-doc convention.
+Firstmate's `bin/` Node tooling manages its dependencies from a root `package.json` with a committed `package-lock.json`; `node_modules/` is gitignored.
+`@cursor/sdk` is a pinned dependency there (currently `1.0.23`, the latest published, non-deprecated release; requires node >= 22.13).
+It is still imported lazily and only on the live (non-dry-run) path, so the dry-run path and the test suite never require it, and CI (which does not run `npm install`) stays deterministic; the offline suite exercises the built-in fake SDK.
+Run `npm install` at the repo root once to populate `node_modules` for live use; the live path then loads the real SDK and fails cleanly with a JSON error only if it truly cannot be resolved.
+
+Track T3 should not wire `cursor-sdk` into `FM_BACKEND_KNOWN` / `FM_BACKEND_SPAWN` for production use until a full green live smoke (create -> send -> read -> kill against a real agent with `CURSOR_API_KEY` set, status landing in `state/<id>.status`) is recorded here with date, version, exact commands, and exact output, per the backend-verification-doc convention.
+A live call needs `CURSOR_API_KEY` and network, which the offline verification below deliberately does not use; that full smoke is left for whoever has a key.
 
 ## Dry-run verification
 
 Date: 2026-07-07.
-Environment: node v24.16.0, macOS, `@cursor/sdk` NOT installed (live path deliberately unexercised).
+Environment: node v24.16.0, macOS, `@cursor/sdk` 1.0.23 installed via the root `package.json`.
+The dry-run path below uses the built-in fake SDK and no network or `CURSOR_API_KEY`; a full live smoke is deferred to whoever has a key (see the dependency note above).
 
 Commands and results:
 
