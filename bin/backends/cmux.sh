@@ -558,7 +558,9 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
     '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
   case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯ '*) stripped=${stripped#'❯ '} ;;
+    '> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯'*) stripped=${stripped#'❯'} ;;
     '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
