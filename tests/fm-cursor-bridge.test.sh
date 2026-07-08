@@ -15,7 +15,7 @@
 # The dry-run store is isolated per case via FM_CURSOR_BRIDGE_DRYRUN_DIR.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v node >/dev/null 2>&1 || fail "node is required to test the Cursor SDK bridge"

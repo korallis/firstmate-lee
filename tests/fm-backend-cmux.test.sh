@@ -10,7 +10,7 @@
 # being installed and reachable.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
@@ -303,7 +303,7 @@ test_dispatch_routes_cmux_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_cmux() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=bin/fm-backend.sh disable=SC1091
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state cmux '11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for cmux (no native agent-state primitive)"
@@ -915,7 +915,7 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version

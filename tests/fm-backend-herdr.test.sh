@@ -10,7 +10,7 @@
 # gated on the herdr binary actually being installed.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
@@ -1312,7 +1312,7 @@ test_dispatch_routes_herdr_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_tmux() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=bin/fm-backend.sh disable=SC1091
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state tmux 'sess:win')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for tmux (no native agent-state primitive; watcher falls back to regex)"
@@ -1328,14 +1328,17 @@ test_dispatch_composer_state_routes_by_backend() {
   # Sourced-guards are pre-set so fm_backend_source no-ops and these stubs are
   # never clobbered by the real per-backend files trying (and failing) a live call.
   (
-    # shellcheck source=bin/fm-backend.sh
+    # shellcheck source=bin/fm-backend.sh disable=SC1091
     . "$ROOT/bin/fm-backend.sh"
     _FM_BACKEND_TMUX_SOURCED=1
     _FM_BACKEND_HERDR_SOURCED=1
     _FM_BACKEND_ORCA_SOURCED=1
     _FM_BACKEND_ZELLIJ_SOURCED=1
+    # shellcheck disable=SC2329
     fm_tmux_composer_state() { [ "$1" = "sess:win" ] || fail "tmux composer_state got wrong target: $1"; printf 'pending'; }
+    # shellcheck disable=SC2329
     fm_backend_herdr_composer_state() { [ "$1" = "default:w1:p2" ] || fail "herdr composer_state got wrong target: $1"; printf 'empty'; }
+    # shellcheck disable=SC2329
     fm_backend_orca_composer_state() { [ "$1" = "term-1" ] || fail "orca composer_state got wrong target: $1"; printf 'empty'; }
     [ "$(fm_backend_composer_state tmux sess:win)" = pending ] || fail "composer_state did not dispatch to the tmux classifier"
     [ "$(fm_backend_composer_state herdr default:w1:p2)" = empty ] || fail "composer_state did not dispatch to the herdr classifier"
@@ -1606,7 +1609,7 @@ test_no_jq_reserved_keyword_arg_names() {
   pass "no bin/ jq filter names a --arg/--argjson variable after a jq reserved keyword"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_protocol
