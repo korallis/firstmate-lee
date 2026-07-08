@@ -39,13 +39,13 @@
 // VERBS
 // ---------------------------------------------------------------------------
 //
-// create  Start an agent and (optionally) run its first turn.
+// create  Start an agent and run its first turn.
 //   Required: --cwd <dir>            Workspace path (Agent.create local.cwd).
 //             --state-file <path>    Absolute path to state/<id>.status; the
 //                                    return channel the bridge appends to.
+//             --prompt <text> | --prompt-file <path>
+//                                    Initial prompt for the first turn.
 //   Optional: --id <task-id>         Firstmate task id, recorded for tracing.
-//             --prompt <text>        Initial prompt; if omitted no turn runs.
-//             --prompt-file <path>   Read the initial prompt from a file.
 //             --model <id>           Default "composer-2.5".
 //             --effort <value>       Reasoning effort -> model.params entry.
 //             --runtime local|cloud  Default "local".
@@ -74,7 +74,7 @@
 // kill    Cancel any active run and archive/stop the agent.
 //   Reattach: --session <path>, OR --agent-id <id> --cwd <dir>.
 //   Optional: --delete   Permanently delete instead of archiving.
-//   Prints:  {"ok":true,"agent_id":"...","archived":true}
+//   Prints:  {"ok":true,"agent_id":"...","archived":true,"deleted":false}
 //
 // --help  Print this contract to stdout and exit 0.
 //
@@ -89,12 +89,11 @@
 //   run started/running      -> "working: cursor <runtime> turn started"
 //   run finished             -> "working: cursor turn finished (idle)"
 //   run error                -> "failed: <error message>"
-//   awaiting input (request) -> "needs-decision: agent requested input"
 // A finished TURN is not the same as a finished TASK: the bridge never
 // synthesizes a "done:" line, because task completion is firstmate's judgment
-// (via fm-crew-state), not a transport detail. Headless SDK runs have no
-// human-in-the-loop, so a `request` event is surfaced as needs-decision rather
-// than answered here.
+// (via fm-crew-state), not a transport detail. Request events are not mapped
+// to firstmate decisions until the bridge has a verified human-input payload
+// shape to surface.
 //
 // STRICT: no TypeScript `any`; precise JSDoc types throughout. No deprecated
 // APIs. `@cursor/sdk` is imported lazily and ONLY on the live path, so dry-run
@@ -225,6 +224,7 @@ const SESSION_SCHEMA = 'fm-cursor-bridge/session@1';
  * @property {(agentId: string, opts?: object) => Promise<SdkAgent>} resume
  * @property {(agentId: string, opts?: object) => Promise<SdkAgentInfo>} get
  * @property {(agentId: string, opts?: object) => Promise<TranscriptTurn[]>} conversationOf
+ * @property {(agentId: string, opts?: object) => Promise<void>} cancelActiveRuns
  * @property {(agentId: string, opts?: object) => Promise<void>} archive
  * @property {(agentId: string, opts?: object) => Promise<void>} delete
  */
@@ -560,10 +560,25 @@ async function loadSdk(opts, dryRun) {
       const latest = runs.items?.[0];
       if (!latest || typeof latest.conversation !== 'function') return [];
       if (typeof latest.supports === 'function' && !latest.supports('conversation')) return [];
-      const turns = /** @type {{type?:string, message?:{content?:{type:string,text?:string}[]}, text?:string, role?:string}[]} */ (
-        await latest.conversation()
-      );
-      return turns.map(normalizeTurn);
+      const turns = /** @type {ConversationTurnLike[]} */ (await latest.conversation());
+      return turns.flatMap(normalizeTurn);
+    },
+    cancelActiveRuns: async (agentId, o) => {
+      const listOptions = isCloud(o)
+        ? { runtime: 'cloud', limit: 20 }
+        : { runtime: 'local', cwd: localCwd(o), limit: 20 };
+      /** @typedef {{id?: string, status?: string, supports?: (op: string) => boolean, cancel?: () => Promise<void>}} CancellableRun */
+      const runs = /** @type {{items?: CancellableRun[]}} */ (await Agent.listRuns(agentId, listOptions));
+      for (const run of runs.items ?? []) {
+        if (run.status !== 'running') continue;
+        if (typeof run.supports === 'function' && !run.supports('cancel')) {
+          runtimeError(`cursor run ${run.id ?? '<unknown>'} cannot be cancelled`);
+        }
+        if (typeof run.cancel !== 'function') {
+          runtimeError(`cursor run ${run.id ?? '<unknown>'} has no cancel operation`);
+        }
+        await run.cancel();
+      }
     },
     archive: (agentId, o) => /** @type {Promise<void>} */ (Agent.archive(agentId, opOptions(o))),
     delete: (agentId, o) => /** @type {Promise<void>} */ (Agent.delete(agentId, opOptions(o))),
@@ -572,19 +587,52 @@ async function loadSdk(opts, dryRun) {
 
 /**
  * Normalize a live-SDK conversation turn to {@link TranscriptTurn}.
- * @param {{type?:string, message?:{content?:{type:string,text?:string}[]}, text?:string, role?:string}} turn
- * @returns {TranscriptTurn}
+ * @typedef {object} TextBlockLike
+ * @property {string=} type
+ * @property {string=} text
+ *
+ * @typedef {object} MessageContentLike
+ * @property {TextBlockLike[]=} content
+ * @property {string=} text
+ *
+ * @typedef {object} ConversationStepLike
+ * @property {string=} type
+ * @property {MessageContentLike=} message
+ *
+ * @typedef {object} ConversationTurnLike
+ * @property {string=} type
+ * @property {string=} role
+ * @property {string=} text
+ * @property {MessageContentLike=} message
+ * @property {{userMessage?: {text?: string}, steps?: ConversationStepLike[]}=} turn
+ *
+ * @param {ConversationTurnLike} turn
+ * @returns {TranscriptTurn[]}
  */
 function normalizeTurn(turn) {
+  if (turn.type === 'agentConversationTurn' && turn.turn) {
+    /** @type {TranscriptTurn[]} */
+    const transcript = [];
+    if (typeof turn.turn.userMessage?.text === 'string' && turn.turn.userMessage.text !== '') {
+      transcript.push({ role: 'user', text: turn.turn.userMessage.text });
+    }
+    for (const step of turn.turn.steps ?? []) {
+      if (step.type === 'assistantMessage' && typeof step.message?.text === 'string' && step.message.text !== '') {
+        transcript.push({ role: 'assistant', text: step.message.text });
+      }
+    }
+    return transcript;
+  }
+
   const role = turn.role ?? turn.type ?? 'unknown';
   if (turn.message?.content) {
     const text = turn.message.content
       .filter((b) => b.type === 'text' && typeof b.text === 'string')
       .map((b) => b.text ?? '')
       .join('');
-    return { role, text };
+    return text === '' ? [] : [{ role, text }];
   }
-  return { role, text: typeof turn.text === 'string' ? turn.text : '' };
+  return typeof turn.text === 'string' && turn.text !== '' ? [{ role, text: turn.text }] : [];
 }
 
 // --- turn execution + status mapping ----------------------------------------
@@ -604,23 +652,20 @@ async function runTurn(agent, message, ref) {
   if (isLocal) await appendStatus(stateFile, `working: cursor ${ref.runtime} turn started`);
 
   let assistantText = '';
-  let sawRequest = false;
   for await (const ev of run.stream()) {
     if (ev.type === 'assistant' && ev.message?.content) {
       for (const block of ev.message.content) {
         if (block.type === 'text' && typeof block.text === 'string') assistantText += block.text;
       }
-    } else if (ev.type === 'request') {
-      sawRequest = true;
     }
   }
 
   const result = await run.wait();
   if (isLocal) {
-    if (sawRequest) {
-      await appendStatus(stateFile, 'needs-decision: agent requested input');
-    } else if (result.status === 'error') {
+    if (result.status === 'error') {
       await appendStatus(stateFile, `failed: ${result.error?.message ?? 'cursor run error'}`);
+    } else if (result.status === 'cancelled') {
+      await appendStatus(stateFile, 'failed: cursor run cancelled');
     } else if (result.status === 'finished') {
       await appendStatus(stateFile, 'working: cursor turn finished (idle)');
     }
@@ -636,6 +681,8 @@ async function cmdCreate(opts) {
   if (opts.runtime === 'local' && !opts.stateFile) {
     usageError('create --runtime local requires --state-file <path>');
   }
+  const prompt = await resolvePrompt(opts);
+  if (prompt === undefined) usageError('create requires --prompt <text> or --prompt-file <path>');
   const cwd = path.resolve(opts.cwd);
   const stateFile = opts.stateFile ? path.resolve(opts.stateFile) : undefined;
   const sdk = await loadSdk(opts, opts.dryRun);
@@ -661,19 +708,16 @@ async function cmdCreate(opts) {
   const sessionFile = defaultSessionPath(opts, agent.agentId);
   await writeSession(sessionFile, record);
 
-  const prompt = await resolvePrompt(opts);
   /** @type {{runId:string,status:string}|undefined} */
   let firstTurn;
-  if (prompt !== undefined) {
-    /** @type {AgentRef} */
-    const ref = { agentId: agent.agentId, runtime: opts.runtime, cwd, model: opts.model, stateFile, id: opts.id };
-    if (opts.wait) {
-      const t = await runTurn(agent, prompt, ref);
-      firstTurn = { runId: t.runId, status: t.status };
-    } else {
-      // Fire the turn but do not await completion.
-      void agent.send(prompt);
-    }
+  /** @type {AgentRef} */
+  const ref = { agentId: agent.agentId, runtime: opts.runtime, cwd, model: opts.model, stateFile, id: opts.id };
+  if (opts.wait) {
+    const t = await runTurn(agent, prompt, ref);
+    firstTurn = { runId: t.runId, status: t.status };
+  } else {
+    // Fire the turn but do not await completion.
+    void agent.send(prompt);
   }
   agent.close();
 
@@ -733,13 +777,14 @@ async function cmdRead(opts) {
 async function cmdKill(opts) {
   const ref = await resolveAgentRef(opts);
   const sdk = await loadSdk(ref, opts.dryRun);
+  await sdk.cancelActiveRuns(ref.agentId, refRouting(ref));
   if (opts.deleteAgent) {
     await sdk.delete(ref.agentId, refRouting(ref));
-    printJson({ ok: true, verb: 'kill', agent_id: ref.agentId, deleted: true });
+    printJson({ ok: true, verb: 'kill', agent_id: ref.agentId, archived: false, deleted: true });
     return;
   }
   await sdk.archive(ref.agentId, refRouting(ref));
-  printJson({ ok: true, verb: 'kill', agent_id: ref.agentId, archived: true });
+  printJson({ ok: true, verb: 'kill', agent_id: ref.agentId, archived: true, deleted: false });
 }
 
 /**
@@ -773,7 +818,7 @@ function makeFakeSdk() {
    * @property {string} model
    * @property {('running'|'finished'|'error')} status
    * @property {boolean} archived
-   * @property {TranscriptTurn[]} transcript
+   * @property {ConversationTurnLike[]} transcript
    */
 
   /** @param {string} agentId */
@@ -791,6 +836,9 @@ function makeFakeSdk() {
     await fs.writeFile(storePath(store.agentId), `${JSON.stringify(store)}\n`);
   };
 
+  /** @param {FakeStore} store @returns {TranscriptTurn[]} */
+  const transcriptOf = (store) => store.transcript.flatMap(normalizeTurn);
+
   /**
    * @param {FakeStore} store
    * @param {string} message
@@ -804,6 +852,7 @@ function makeFakeSdk() {
     const events = [
       { type: 'system' },
       { type: 'user', message: { content: [{ type: 'text', text: message }] } },
+      ...(message === '__fm_cursor_fake_request_event__' ? [{ type: 'request', request_id: 'dry-request' }] : []),
       { type: 'assistant', message: { content: [{ type: 'text', text: reply }] } },
     ];
     return {
@@ -813,8 +862,13 @@ function makeFakeSdk() {
         for (const ev of events) yield ev;
       },
       wait: async () => {
-        store.transcript.push({ role: 'user', text: message });
-        store.transcript.push({ role: 'assistant', text: reply });
+        store.transcript.push({
+          type: 'agentConversationTurn',
+          turn: {
+            userMessage: { text: message },
+            steps: [{ type: 'assistantMessage', message: { text: reply } }],
+          },
+        });
         store.status = 'finished';
         await save(store);
         return { id: runId, status: 'finished', result: reply };
@@ -845,14 +899,22 @@ function makeFakeSdk() {
     resume: async (agentId) => makeAgent(await load(agentId)),
     get: async (agentId) => {
       const store = await load(agentId);
+      const transcript = transcriptOf(store);
       return {
         agentId,
-        summary: store.transcript.length ? store.transcript[store.transcript.length - 1].text : '',
+        summary: transcript.length ? transcript[transcript.length - 1].text : '',
         status: store.status,
         archived: store.archived,
       };
     },
-    conversationOf: async (agentId) => (await load(agentId)).transcript,
+    conversationOf: async (agentId) => transcriptOf(await load(agentId)),
+    cancelActiveRuns: async (agentId) => {
+      const store = await load(agentId);
+      if (store.status === 'running') {
+        store.status = 'finished';
+        await save(store);
+      }
+    },
     archive: async (agentId) => {
       const store = await load(agentId);
       store.archived = true;
@@ -881,7 +943,7 @@ function extractHeaderContract() {
     '',
     'Verbs:',
     '  create  Start an agent. Required: --cwd <dir>; --state-file <path> for',
-    '          --runtime local. Optional: --id, --prompt/--prompt-file, --model',
+    '          --runtime local; --prompt/--prompt-file. Optional: --id, --model',
     `          (default ${DEFAULT_MODEL}), --effort, --runtime local|cloud,`,
     '          --session-file, --no-wait. Prints {agent_id, session_ref}.',
     '  send    Send a prompt/steer line. Reattach via --session <path> or',

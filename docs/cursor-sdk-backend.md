@@ -17,10 +17,10 @@ A caller parses stdout as JSON and branches on `ok`; it never screen-scrapes pro
 
 | Verb | Purpose | Key flags | Prints |
 | --- | --- | --- | --- |
-| `create` | Start an agent, optionally run its first turn | `--cwd`, `--state-file` (local), `--id`, `--prompt`/`--prompt-file`, `--model`, `--effort`, `--runtime`, `--session-file`, `--no-wait` | `{ok, agent_id, session_ref, runtime, model}` |
+| `create` | Start an agent and run its first turn | `--cwd`, `--state-file` (local), `--prompt`/`--prompt-file`, `--id`, `--model`, `--effort`, `--runtime`, `--session-file`, `--no-wait` | `{ok, agent_id, session_ref, runtime, model}` |
 | `send` | Send a prompt or steer line as a new run | `--session` or `--agent-id`+`--cwd`, `--prompt`/`--prompt-file`, `--no-wait` | `{ok, agent_id, run_id, status}` |
 | `read` | Return transcript/state for `fm-peek` / `fm-crew-state` | `--session` or `--agent-id`+`--cwd`, `--limit` | `{ok, agent_id, runtime, status, archived, model, summary, last_status_line, transcript[]}` |
-| `kill` | Cancel any active run and archive (or `--delete`) the agent | `--session` or `--agent-id`+`--cwd`, `--delete` | `{ok, agent_id, archived}` |
+| `kill` | Cancel any active run and archive (or `--delete`) the agent | `--session` or `--agent-id`+`--cwd`, `--delete` | `{ok, agent_id, archived, deleted}` |
 
 `create` persists a session JSON at `session_ref` holding `agent_id`, `runtime`, `cwd`, `model`, `state_file`, and `id`.
 That file is enough for `send`, `read`, and `kill` to reattach to the same agent from a fresh process, mirroring `@cursor/sdk`'s durable-agent flow (`Agent.resume(agentId)` after the local process restarted).
@@ -33,11 +33,9 @@ While a `create` or `send` turn runs in the local runtime, the bridge consumes t
 - run started/running -> `working: cursor <runtime> turn started`
 - run finished -> `working: cursor turn finished (idle)`
 - run error -> `failed: <error message>`
-- awaiting input (a `request` event) -> `needs-decision: agent requested input`
-
 The lines are deliberately sparse (one at turn start, one at turn end), because every append wakes firstmate.
 A finished turn is not a finished task: the bridge never writes a `done:` line, because task completion is firstmate's judgment via `fm-crew-state`, not a transport detail.
-Headless SDK runs have no human-in-the-loop, so an approval/input `request` is surfaced as `needs-decision` rather than answered inside the bridge.
+Request events are not mapped to firstmate decisions until the bridge has a verified human-input payload shape to surface.
 
 ## Local vs. cloud runtime
 
@@ -65,8 +63,8 @@ A live call needs `CURSOR_API_KEY` and network, which the offline verification b
 
 ## Dry-run verification
 
-Date: 2026-07-07.
-Environment: node v24.16.0, macOS, `@cursor/sdk` 1.0.23 installed via the root `package.json`.
+Date: 2026-07-08.
+Environment: node v24.16.0, macOS, `@cursor/sdk` 1.0.23 pinned in the root `package.json` and not installed in this isolated worktree.
 The dry-run path below uses the built-in fake SDK and no network or `CURSOR_API_KEY`; a full live smoke is deferred to whoever has a key (see the dependency note above).
 
 Commands and results:
@@ -87,11 +85,11 @@ $ node bin/fm-cursor-bridge.mjs read --dry-run --session <sess>
 {"ok":true,"verb":"read","agent_id":"agent-dry-...","runtime":"local","status":"finished","archived":false,"model":"composer-2.5","summary":"...","last_status_line":"working: cursor turn finished (idle)","transcript":[{"role":"user","text":"also add tests"},{"role":"assistant","text":"..."}]}
 
 $ node bin/fm-cursor-bridge.mjs kill --dry-run --session <sess>
-{"ok":true,"verb":"kill","agent_id":"agent-dry-...","archived":true}
+{"ok":true,"verb":"kill","agent_id":"agent-dry-...","archived":true,"deleted":false}
 
 $ cat <state>/demo.status
 working: cursor local turn started
 working: cursor turn finished (idle)
 ```
 
-`tests/fm-cursor-bridge.test.sh` pins this contract (12 cases: the four verbs end to end, reattach by session and by agent-id, cloud-runtime flag parity, the usage-error exit codes, the status-file writes, and the clean live-path failure when `@cursor/sdk` is absent).
+`tests/fm-cursor-bridge.test.sh` pins this contract (15 cases: the four verbs end to end, reattach by session and by agent-id, prompt-required create, cloud-runtime flag parity, request-event status behavior, kill cancellation, stable kill shape, the usage-error exit codes, the status-file writes, and the clean live-path failure when `@cursor/sdk` is absent).

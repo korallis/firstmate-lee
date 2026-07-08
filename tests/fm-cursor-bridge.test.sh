@@ -109,6 +109,7 @@ test_lifecycle_end_to_end() {
   assert_valid_json "$out" "kill output"
   [ "$(jget "$out" ok)" = "true" ] || fail "kill ok!=true: $out"
   [ "$(jget "$out" archived)" = "true" ] || fail "kill archived!=true: $out"
+  [ "$(jget "$out" deleted)" = "false" ] || fail "kill deleted!=false: $out"
 
   out=$(node "$BRIDGE" read --dry-run --session "$sess")
   [ "$(jget "$out" archived)" = "true" ] || fail "read after kill archived!=true: $out"
@@ -128,25 +129,68 @@ test_reattach_by_agent_id() {
   pass "reattach by --agent-id/--cwd works without a session file"
 }
 
-# create without a prompt starts the agent but runs no turn (no status lines).
-test_create_without_prompt_runs_no_turn() {
+# create without a prompt is a usage error in this phase.
+test_create_requires_prompt() {
   local d; d=$(new_case noprompt); use_case "$d"
-  local sf="$d/state/np.status" out
-  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id np)
-  [ "$(jget "$out" ok)" = "true" ] || fail "create-no-prompt ok!=true: $out"
-  [ -z "$(jget "$out" first_run_id)" ] || fail "create-no-prompt should not run a turn: $out"
-  assert_absent "$sf" "create with no prompt writes no status line"
-  pass "create without a prompt runs no turn and writes no status"
+  local sf="$d/state/np.status" sess="$d/np.session.json" out rc
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id np --session-file "$sess" 2>/dev/null); rc=$?
+  expect_code 2 "$rc" "create without --prompt exits 2"
+  [ "$(jget "$out" ok)" = "false" ] || fail "create-no-prompt ok!=false: $out"
+  assert_absent "$sf" "create without prompt writes no status line"
+  assert_absent "$sess" "create without prompt writes no session"
+  pass "create requires an initial prompt"
 }
 
 # cloud runtime is a flag, not a rewrite: the same verbs return the same shapes.
 test_cloud_runtime_is_a_flag() {
   local d; d=$(new_case cloud); use_case "$d"
   local sess="$d/c.session.json" out
-  out=$(node "$BRIDGE" create --dry-run --runtime cloud --cwd "$d/repo" --id c --session-file "$sess")
+  out=$(node "$BRIDGE" create --dry-run --runtime cloud --cwd "$d/repo" --id c --session-file "$sess" --prompt hi)
   [ "$(jget "$out" ok)" = "true" ] || fail "cloud create ok!=true: $out"
   [ "$(jget "$out" runtime)" = "cloud" ] || fail "cloud create runtime!=cloud: $out"
   pass "cloud runtime is a flag and reuses the same contract"
+}
+
+test_request_event_does_not_override_terminal_status() {
+  local d; d=$(new_case requestevent); use_case "$d"
+  local sf="$d/state/req.status" sess="$d/req.session.json" out
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id req \
+    --prompt "__fm_cursor_fake_request_event__" --session-file "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "request-event create ok!=true: $out"
+  [ "$(jget "$out" first_run_status)" = "finished" ] || fail "request-event create did not finish: $out"
+  assert_no_grep "needs-decision:" "$sf" "request event must not be mapped to needs-decision"
+  assert_grep "working: cursor turn finished (idle)" "$sf" "request-event run should still finish idle"
+  pass "request events do not override terminal run status"
+}
+
+test_kill_cancels_active_run_before_archive() {
+  local d; d=$(new_case cancelkill); use_case "$d"
+  local sf="$d/state/k.status" sess="$d/k.session.json" out
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id k \
+    --prompt "keep running" --session-file "$sess" --no-wait)
+  [ "$(jget "$out" ok)" = "true" ] || fail "no-wait create ok!=true: $out"
+  out=$(node "$BRIDGE" read --dry-run --session "$sess")
+  [ "$(jget "$out" status)" = "running" ] || fail "no-wait create should leave a running fake run: $out"
+  out=$(node "$BRIDGE" kill --dry-run --session "$sess")
+  [ "$(jget "$out" archived)" = "true" ] || fail "kill archived!=true: $out"
+  [ "$(jget "$out" deleted)" = "false" ] || fail "kill deleted!=false: $out"
+  out=$(node "$BRIDGE" read --dry-run --session "$sess")
+  [ "$(jget "$out" status)" = "finished" ] || fail "kill should cancel active run before archive: $out"
+  [ "$(jget "$out" archived)" = "true" ] || fail "kill should still archive after cancel: $out"
+  pass "kill cancels an active run before archiving"
+}
+
+test_kill_delete_returns_stable_shape() {
+  local d; d=$(new_case deletekill); use_case "$d"
+  local sf="$d/state/d.status" sess="$d/d.session.json" out
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id d \
+    --prompt "delete me" --session-file "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "delete setup create ok!=true: $out"
+  out=$(node "$BRIDGE" kill --dry-run --session "$sess" --delete)
+  [ "$(jget "$out" ok)" = "true" ] || fail "delete kill ok!=true: $out"
+  [ "$(jget "$out" archived)" = "false" ] || fail "delete kill archived!=false: $out"
+  [ "$(jget "$out" deleted)" = "true" ] || fail "delete kill deleted!=true: $out"
+  pass "kill --delete returns the stable kill shape"
 }
 
 # --- usage / error contract -------------------------------------------------
@@ -217,8 +261,11 @@ test_live_path_without_sdk_fails_cleanly() {
 test_help_prints_contract
 test_lifecycle_end_to_end
 test_reattach_by_agent_id
-test_create_without_prompt_runs_no_turn
+test_create_requires_prompt
 test_cloud_runtime_is_a_flag
+test_request_event_does_not_override_terminal_status
+test_kill_cancels_active_run_before_archive
+test_kill_delete_returns_stable_shape
 test_no_verb_is_usage_error
 test_unknown_verb_is_usage_error
 test_unknown_flag_is_usage_error
