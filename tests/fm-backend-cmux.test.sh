@@ -10,7 +10,7 @@
 # being installed and reachable.
 set -u
 
-# shellcheck source=tests/lib.sh
+# shellcheck source=tests/lib.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the cmux adapter)"; exit 0; }
@@ -303,7 +303,7 @@ test_dispatch_routes_cmux_backend() {
 }
 
 test_dispatch_busy_state_unknown_for_cmux() {
-  # shellcheck source=bin/fm-backend.sh
+  # shellcheck source=bin/fm-backend.sh disable=SC1091
   . "$ROOT/bin/fm-backend.sh"
   [ "$(fm_backend_busy_state cmux '11111111-1111-1111-1111-111111111111:22222222-2222-2222-2222-222222222222')" = unknown ] \
     || fail "fm_backend_busy_state should report unknown for cmux (no native agent-state primitive)"
@@ -665,7 +665,7 @@ test_composer_state_bare_prompt_is_empty() {
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯                      │\n  ╰──────── Composer ─────╯\n\n  Enter:send'
   fb=$(make_cmux_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
   [ "$out" = empty ] || fail "a bare prompt glyph should read as empty, got '$out'"
   pass "fm_backend_cmux_composer_state: a bare '❯' composer row reads empty"
@@ -677,7 +677,7 @@ test_composer_state_ghost_placeholder_is_empty() {
   cmux_panes_response "$dir" 1 "bbbbbbbb-1111-1111-1111-111111111111"
   cmux_read_screen_response "$dir" 2 $'  ╭────────────────────────╮\n  │ ❯ Type a message...    │\n  ╰──────── Composer ─────╯'
   fb=$(make_cmux_fakebin "$dir")
-  out=$( PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
+  out=$( LC_ALL=C PATH="$fb:$PATH" FM_CMUX_LOG="$dir/log" FM_CMUX_RESPONSES="$dir/responses" \
     bash -c '. "$0/bin/backends/cmux.sh"; fm_backend_cmux_composer_state "aaaaaaaa-0000-0000-0000-000000000000:bbbbbbbb-1111-1111-1111-111111111111"' "$ROOT" )
   [ "$out" = empty ] || fail "the known ghost placeholder 'Type a message...' should read as empty, got '$out'"
   pass "fm_backend_cmux_composer_state: the ghost placeholder text reads empty, not pending"
@@ -915,7 +915,7 @@ test_secondmate_spawn_refuses_cmux_backend() {
   pass "fm-spawn.sh: refuses backend=cmux for --secondmate spawns (mirrors Orca's refusal; no secondmate launch design exists yet)"
 }
 
-# shellcheck source=bin/fm-backend.sh
+# shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$ROOT/bin/fm-backend.sh"
 
 test_version_check_accepts_current_version

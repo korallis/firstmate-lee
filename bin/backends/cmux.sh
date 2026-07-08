@@ -109,7 +109,7 @@ FM_BACKEND_CMUX_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-${FM_ROOT:-$FM_BACKEND_CMUX_ROOT}}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 
-# shellcheck source=bin/fm-backend-hometag-lib.sh
+# shellcheck source=bin/fm-backend-hometag-lib.sh disable=SC1091
 . "$FM_BACKEND_CMUX_ROOT/bin/fm-backend-hometag-lib.sh"
 
 # Verified minimum: the version the live pass ran against (docs/cmux-backend.md).
@@ -558,8 +558,10 @@ fm_backend_cmux_composer_state() {  # <target> [expected-label] -> empty|pending
     '❯'|'>'|'$'|'%'|'#') printf 'empty'; return 0 ;;
   esac
   case "$stripped" in
-    '❯ '*|'> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
-    '❯'*|'>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
+    '❯ '*) stripped=${stripped#'❯ '} ;;
+    '> '*|'$ '*|'% '*|'# '*) stripped=${stripped#??} ;;
+    '❯'*) stripped=${stripped#'❯'} ;;
+    '>'*|'$'*|'%'*|'#'*) stripped=${stripped#?} ;;
   esac
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
