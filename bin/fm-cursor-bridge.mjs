@@ -105,6 +105,7 @@ import process from 'node:process';
 const DEFAULT_MODEL = 'composer-2.5';
 const DEFAULT_EFFORT_PARAM_ID = 'reasoning_effort';
 const DEFAULT_TRANSCRIPT_LIMIT = 40;
+const RUN_LIST_PAGE_LIMIT = 100;
 const SESSION_SCHEMA = 'fm-cursor-bridge/session@1';
 
 /**
@@ -618,20 +619,52 @@ async function loadSdk(opts, dryRun) {
     }
     return isCloud(o) ? { model } : { model, local: { cwd: localCwd(o) } };
   };
+  /**
+   * @param {{cwd?: string, runtime?: Runtime}} [o]
+   * @param {string|undefined} cursor
+   * @returns {{runtime: Runtime, cwd?: string, limit: number, cursor?: string}}
+   */
+  const runListOptions = (o, cursor) => {
+    const base = isCloud(o)
+      ? { runtime: /** @type {Runtime} */ ('cloud'), limit: RUN_LIST_PAGE_LIMIT }
+      : { runtime: /** @type {Runtime} */ ('local'), cwd: localCwd(o), limit: RUN_LIST_PAGE_LIMIT };
+    return cursor ? { ...base, cursor } : base;
+  };
+  /** @typedef {{id?: string, status?: string, createdAt?: number, conversation?: () => Promise<unknown[]>, supports?: (op: string) => boolean, cancel?: () => Promise<void>}} ListedRun */
+  /**
+   * @param {string} agentId
+   * @param {{cwd?: string, runtime?: Runtime}} [o]
+   * @returns {Promise<ListedRun[]>}
+   */
+  const listAllRuns = async (agentId, o) => {
+    /** @type {ListedRun[]} */
+    const all = [];
+    /** @type {string|undefined} */
+    let cursor;
+    const seenCursors = new Set();
+    for (;;) {
+      const page = /** @type {{items?: ListedRun[], nextCursor?: string}} */ (
+        await Agent.listRuns(agentId, runListOptions(o, cursor))
+      );
+      all.push(...(page.items ?? []));
+      if (!page.nextCursor) break;
+      if (seenCursors.has(page.nextCursor)) {
+        runtimeError(`cursor run pagination repeated cursor ${page.nextCursor}`);
+      }
+      seenCursors.add(page.nextCursor);
+      cursor = page.nextCursor;
+    }
+    return all;
+  };
+  /** @param {ListedRun[]} runs @returns {ListedRun|undefined} */
+  const latestRun = (runs) => runs[runs.length - 1];
 
   return {
     create: (o) => /** @type {Promise<SdkAgent>} */ (Agent.create(o)),
     resume: (agentId, o) => /** @type {Promise<SdkAgent>} */ (Agent.resume(agentId, resumeOptions(o))),
     get: (agentId, o) => /** @type {Promise<SdkAgentInfo>} */ (Agent.get(agentId, opOptions(o))),
     conversationOf: async (agentId, o) => {
-      // Read the most recent run's conversation turns without opening a new
-      // agent handle: listRuns is enough, and the run exposes conversation().
-      const listOptions = isCloud(o)
-        ? { runtime: 'cloud' }
-        : { runtime: 'local', cwd: localCwd(o) };
-      /** @typedef {{status?: string, conversation?: () => Promise<unknown[]>, supports?: (op: string) => boolean}} ReadableRun */
-      const runs = /** @type {{items?: ReadableRun[]}} */ (await Agent.listRuns(agentId, listOptions));
-      const latest = runs.items?.[0];
+      const latest = latestRun(await listAllRuns(agentId, o));
       if (!latest || typeof latest.conversation !== 'function') return [];
       if (latest.status === 'running') return [];
       if (typeof latest.supports === 'function' && !latest.supports('conversation')) return [];
@@ -639,12 +672,8 @@ async function loadSdk(opts, dryRun) {
       return turns.flatMap(normalizeTurn);
     },
     cancelActiveRuns: async (agentId, o) => {
-      const listOptions = isCloud(o)
-        ? { runtime: 'cloud', limit: 20 }
-        : { runtime: 'local', cwd: localCwd(o), limit: 20 };
-      /** @typedef {{id?: string, status?: string, supports?: (op: string) => boolean, cancel?: () => Promise<void>}} CancellableRun */
-      const runs = /** @type {{items?: CancellableRun[]}} */ (await Agent.listRuns(agentId, listOptions));
-      for (const run of runs.items ?? []) {
+      const runs = await listAllRuns(agentId, o);
+      for (const run of runs) {
         if (run.status !== 'running') continue;
         if (typeof run.supports === 'function' && !run.supports('cancel')) {
           runtimeError(`cursor run ${run.id ?? '<unknown>'} cannot be cancelled`);

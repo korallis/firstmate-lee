@@ -284,6 +284,72 @@ JS
   pass "live read skips conversation collection for running runs"
 }
 
+test_live_read_uses_newest_listed_run() {
+  local d; d=$(new_case readnewest); use_case "$d"
+  local bridge_dir="$d/bin" sdk_dir="$d/node_modules/@cursor/sdk"
+  local sess="$d/newest.session.json" out model
+  model="cursor-read-model"
+  mkdir -p "$bridge_dir" "$sdk_dir"
+  cp "$BRIDGE" "$bridge_dir/fm-cursor-bridge.mjs"
+  cat > "$sdk_dir/package.json" <<'JSON'
+{"type":"module","main":"index.js"}
+JSON
+  cat > "$sdk_dir/index.js" <<'JS'
+const turn = (prompt, reply) => ({
+  type: "agentConversationTurn",
+  turn: {
+    userMessage: { text: prompt },
+    steps: [{ type: "assistantMessage", message: { text: reply } }],
+  },
+});
+
+export const Agent = {
+  async get(agentId) {
+    return { agentId, status: "finished", archived: false, summary: "latest run" };
+  },
+  async listRuns() {
+    return {
+      items: [
+        {
+          id: "run-old",
+          status: "finished",
+          supports: (op) => op === "conversation",
+          conversation: async () => [turn("old prompt", "old reply")],
+        },
+        {
+          id: "run-new",
+          status: "finished",
+          supports: (op) => op === "conversation",
+          conversation: async () => [turn("latest prompt", "latest reply")],
+        },
+      ],
+    };
+  },
+};
+JS
+  node -e '
+    const fs = require("node:fs");
+    const [file, cwd, model] = process.argv.slice(1);
+    fs.writeFileSync(file, JSON.stringify({
+      schema: "fm-cursor-bridge/session@1",
+      agent_id: "agent-read-newest-stub",
+      runtime: "local",
+      cwd,
+      model,
+      model_selection: { id: model },
+      state_file: "",
+      id: "readnewest",
+      created_at: 0,
+    }) + "\n");
+  ' "$sess" "$d/repo" "$model"
+
+  out=$(node "$bridge_dir/fm-cursor-bridge.mjs" read --session "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "live newest read ok!=true: $out"
+  assert_contains "$out" "latest prompt" "read should collect the newest listed run"
+  assert_not_contains "$out" "old prompt" "read should not return the oldest listed run"
+  pass "live read uses the newest listed run conversation"
+}
+
 # create without a prompt is a usage error in this phase.
 test_create_requires_prompt() {
   local d; d=$(new_case noprompt); use_case "$d"
@@ -341,6 +407,88 @@ test_kill_cancels_active_run_before_archive() {
   [ "$(jget "$out" status)" = "finished" ] || fail "kill should cancel active run before archive: $out"
   [ "$(jget "$out" archived)" = "true" ] || fail "kill should still archive after cancel: $out"
   pass "kill cancels an active run before archiving"
+}
+
+test_live_kill_pages_to_cancel_latest_active_run() {
+  local d; d=$(new_case killpages); use_case "$d"
+  local bridge_dir="$d/bin" sdk_dir="$d/node_modules/@cursor/sdk"
+  local sess="$d/killpages.session.json" cancel_marker="$d/cancelled" archive_marker="$d/archived" list_calls="$d/list-calls.jsonl" out model
+  model="cursor-kill-model"
+  mkdir -p "$bridge_dir" "$sdk_dir"
+  cp "$BRIDGE" "$bridge_dir/fm-cursor-bridge.mjs"
+  cat > "$sdk_dir/package.json" <<'JSON'
+{"type":"module","main":"index.js"}
+JSON
+  cat > "$sdk_dir/index.js" <<'JS'
+import { appendFile, writeFile } from "node:fs/promises";
+
+const finishedRun = (id) => ({
+  id,
+  status: "finished",
+  supports: (op) => op === "cancel",
+  cancel: async () => {
+    throw new Error("finished runs must not be cancelled");
+  },
+});
+
+export const Agent = {
+  async listRuns(_agentId, opts) {
+    await appendFile(process.env.FM_CURSOR_STUB_LIST_CALLS, JSON.stringify({
+      cursor: opts?.cursor ?? "",
+      limit: opts?.limit ?? null,
+    }) + "\n");
+    if (!opts?.cursor) {
+      return {
+        items: Array.from({ length: 20 }, (_v, i) => finishedRun(`run-${i + 1}`)),
+        nextCursor: "page-2",
+      };
+    }
+    if (opts.cursor === "page-2") {
+      return {
+        items: [
+          finishedRun("run-21"),
+          {
+            id: "run-active-late",
+            status: "running",
+            supports: (op) => op === "cancel",
+            cancel: async () => {
+              await writeFile(process.env.FM_CURSOR_STUB_CANCELLED, "cancelled\n");
+            },
+          },
+        ],
+      };
+    }
+    return { items: [] };
+  },
+  async archive() {
+    await writeFile(process.env.FM_CURSOR_STUB_ARCHIVED, "archived\n");
+  },
+};
+JS
+  node -e '
+    const fs = require("node:fs");
+    const [file, cwd, model] = process.argv.slice(1);
+    fs.writeFileSync(file, JSON.stringify({
+      schema: "fm-cursor-bridge/session@1",
+      agent_id: "agent-kill-pages-stub",
+      runtime: "local",
+      cwd,
+      model,
+      model_selection: { id: model },
+      state_file: "",
+      id: "killpages",
+      created_at: 0,
+    }) + "\n");
+  ' "$sess" "$d/repo" "$model"
+
+  out=$(FM_CURSOR_STUB_CANCELLED="$cancel_marker" FM_CURSOR_STUB_ARCHIVED="$archive_marker" \
+    FM_CURSOR_STUB_LIST_CALLS="$list_calls" node "$bridge_dir/fm-cursor-bridge.mjs" kill --session "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "live paged kill ok!=true: $out"
+  [ "$(jget "$out" archived)" = "true" ] || fail "live paged kill archived!=true: $out"
+  assert_present "$cancel_marker" "kill should cancel a running run beyond the first page"
+  assert_present "$archive_marker" "kill should archive after paged cancellation"
+  assert_grep '"cursor":"page-2"' "$list_calls" "kill should request the next run page"
+  pass "live kill pages through runs before archiving"
 }
 
 test_run_rejection_writes_failed_status() {
@@ -448,10 +596,12 @@ test_reattach_by_agent_id
 test_send_resume_preserves_session_model
 test_live_resume_forwards_model_to_sdk
 test_live_read_skips_running_conversation
+test_live_read_uses_newest_listed_run
 test_create_requires_prompt
 test_cloud_runtime_is_a_flag
 test_request_event_does_not_override_terminal_status
 test_kill_cancels_active_run_before_archive
+test_live_kill_pages_to_cancel_latest_active_run
 test_run_rejection_writes_failed_status
 test_kill_delete_returns_stable_shape
 test_no_verb_is_usage_error
