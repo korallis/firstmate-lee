@@ -22,7 +22,7 @@ A caller parses stdout as JSON and branches on `ok`; it never screen-scrapes pro
 | `read` | Return transcript/state for `fm-peek` / `fm-crew-state` | `--session` or `--agent-id`+`--cwd`, `--limit` | `{ok, agent_id, runtime, status, archived, model, summary, last_status_line, transcript[]}` |
 | `kill` | Cancel any active run and archive (or `--delete`) the agent | `--session` or `--agent-id`+`--cwd`, `--delete` | `{ok, agent_id, archived, deleted}` |
 
-`create` persists a session JSON at `session_ref` holding `agent_id`, `runtime`, `cwd`, `model`, `state_file`, and `id`.
+`create` persists a session JSON at `session_ref` holding `agent_id`, `runtime`, `cwd`, `model`, `model_selection`, `state_file`, and `id`.
 That file is enough for `send`, `read`, and `kill` to reattach to the same agent from a fresh process, mirroring `@cursor/sdk`'s durable-agent flow (`Agent.resume(agentId)` after the local process restarted).
 The model defaults to `composer-2.5` and is overridable per invocation with `--model`; `--effort` is passed as a model parameter (`ModelSelection.params`), whose id is model-specific and overridable with `--effort-param-id`.
 
@@ -92,4 +92,4 @@ working: cursor local turn started
 working: cursor turn finished (idle)
 ```
 
-`tests/fm-cursor-bridge.test.sh` pins this contract (18 cases: the four verbs end to end, reattach by session and by agent-id, resumed sends preserving the session model, live resume option forwarding through a local SDK stub, prompt-required create, cloud-runtime flag parity, request-event status behavior, kill cancellation, stream/wait failure status writes, stable kill shape, the usage-error exit codes, the status-file writes, and the clean live-path failure when `@cursor/sdk` is absent).
+`tests/fm-cursor-bridge.test.sh` pins this contract (19 cases: the four verbs end to end, reattach by session and by agent-id, resumed sends preserving the session model selection, live resume option forwarding through a local SDK stub, live read skipping conversation collection for running runs, prompt-required create, cloud-runtime flag parity, request-event status behavior, kill cancellation, stream/wait failure status writes, stable kill shape, the usage-error exit codes, the status-file writes, and the clean live-path failure when `@cursor/sdk` is absent).

@@ -54,7 +54,8 @@
 //   Prints:  {"ok":true,"agent_id":"agent-...","session_ref":"<path>",
 //             "runtime":"local","model":"composer-2.5"}
 //   Persists a session JSON at session_ref holding agent_id, runtime, cwd,
-//   model, state_file and id - enough for send/read/kill to reattach later.
+//   model, model_selection, state_file and id - enough for send/read/kill to
+//   reattach later.
 //
 // send    Send a prompt or steer line to an existing agent (a new run).
 //   Reattach: --session <path>   (preferred), OR
@@ -139,6 +140,7 @@ const SESSION_SCHEMA = 'fm-cursor-bridge/session@1';
  * @property {Runtime} runtime
  * @property {string} cwd
  * @property {string} model
+ * @property {ModelSelection} model_selection
  * @property {string} state_file
  * @property {string|undefined} id
  * @property {number} created_at
@@ -151,6 +153,7 @@ const SESSION_SCHEMA = 'fm-cursor-bridge/session@1';
  * @property {Runtime} runtime
  * @property {string} cwd
  * @property {string} model
+ * @property {ModelSelection} modelSelection
  * @property {string|undefined} stateFile
  * @property {string|undefined} id
  */
@@ -401,6 +404,54 @@ function buildModel(opts) {
   return model;
 }
 
+/**
+ * @param {ModelSelection} model
+ * @returns {ModelSelection}
+ */
+function cloneModelSelection(model) {
+  /** @type {ModelSelection} */
+  const cloned = { id: model.id };
+  if (model.params !== undefined) {
+    cloned.params = model.params.map((p) => ({ id: p.id, value: p.value }));
+  }
+  return cloned;
+}
+
+/**
+ * @param {unknown} value
+ * @param {string} file
+ * @param {string} fallbackModel
+ * @returns {ModelSelection}
+ */
+function sessionModelSelection(value, file, fallbackModel) {
+  if (value === undefined) return { id: fallbackModel };
+  if (typeof value !== 'object' || value === null) {
+    runtimeError(`session file has malformed model_selection: ${file}`);
+  }
+  const rec = /** @type {{id?: unknown, params?: unknown}} */ (value);
+  if (typeof rec.id !== 'string' || rec.id === '') {
+    runtimeError(`session file has malformed model_selection: ${file}`);
+  }
+  /** @type {ModelSelection} */
+  const model = { id: rec.id };
+  if (rec.params !== undefined) {
+    if (!Array.isArray(rec.params)) {
+      runtimeError(`session file has malformed model_selection params: ${file}`);
+    }
+    model.params = rec.params.map((param) => {
+      if (typeof param !== 'object' || param === null) {
+        runtimeError(`session file has malformed model_selection params: ${file}`);
+      }
+      const p = /** @type {{id?: unknown, value?: unknown}} */ (param);
+      if (typeof p.id !== 'string' || typeof p.value !== 'string') {
+        runtimeError(`session file has malformed model_selection params: ${file}`);
+      }
+      return { id: p.id, value: p.value };
+    });
+  }
+  return model;
+}
+
 // --- session persistence ----------------------------------------------------
 
 /**
@@ -449,12 +500,19 @@ async function readSession(file) {
   if (typeof rec.agent_id !== 'string' || (rec.runtime !== 'local' && rec.runtime !== 'cloud')) {
     runtimeError(`session file missing agent_id/runtime: ${file}`);
   }
+  const sessionModel = typeof rec.model === 'string' && rec.model !== '' ? rec.model : undefined;
+  const modelSelection = sessionModelSelection(rec.model_selection, file, sessionModel ?? DEFAULT_MODEL);
+  const model = sessionModel ?? modelSelection.id;
+  if (modelSelection.id !== model) {
+    runtimeError(`session file model does not match model_selection id: ${file}`);
+  }
   return {
     schema: typeof rec.schema === 'string' ? rec.schema : SESSION_SCHEMA,
     agent_id: rec.agent_id,
     runtime: rec.runtime,
     cwd: typeof rec.cwd === 'string' ? rec.cwd : process.cwd(),
-    model: typeof rec.model === 'string' ? rec.model : DEFAULT_MODEL,
+    model,
+    model_selection: modelSelection,
     state_file: typeof rec.state_file === 'string' ? rec.state_file : '',
     id: typeof rec.id === 'string' ? rec.id : undefined,
     created_at: typeof rec.created_at === 'number' ? rec.created_at : 0,
@@ -474,6 +532,7 @@ async function resolveAgentRef(opts) {
       runtime: rec.runtime,
       cwd: rec.cwd,
       model: rec.model,
+      modelSelection: rec.model_selection,
       stateFile: opts.stateFile ?? (rec.state_file || undefined),
       id: rec.id,
     };
@@ -485,6 +544,7 @@ async function resolveAgentRef(opts) {
       runtime: opts.runtime,
       cwd: path.resolve(opts.cwd),
       model: opts.model,
+      modelSelection: buildModel(opts),
       stateFile: opts.stateFile,
       id: opts.id,
     };
@@ -541,11 +601,21 @@ async function loadSdk(opts, dryRun) {
   const opOptions = (o) => (isCloud(o) ? {} : { cwd: localCwd(o) });
   /**
    * Options for resume: cwd is nested under `local` (Partial<AgentOptions>).
-   * @param {{cwd?: string, runtime?: Runtime, model?: string}} [o]
+   * @param {{cwd?: string, runtime?: Runtime, model?: ModelSelection|string}} [o]
    * @returns {{model: ModelSelection, local?: {cwd?: string}}}
    */
   const resumeOptions = (o) => {
-    const model = { id: o?.model ?? opts.model };
+    const route = /** @type {{model?: unknown}} */ (o ?? {});
+    let model;
+    if (typeof route.model === 'object' && route.model !== null && typeof /** @type {{id?: unknown}} */ (route.model).id === 'string') {
+      model = cloneModelSelection(/** @type {ModelSelection} */ (route.model));
+    } else if (typeof route.model === 'string') {
+      model = { id: route.model };
+    } else if ('modelSelection' in opts) {
+      model = cloneModelSelection(/** @type {AgentRef} */ (opts).modelSelection);
+    } else {
+      model = { id: opts.model };
+    }
     return isCloud(o) ? { model } : { model, local: { cwd: localCwd(o) } };
   };
 
@@ -559,10 +629,11 @@ async function loadSdk(opts, dryRun) {
       const listOptions = isCloud(o)
         ? { runtime: 'cloud' }
         : { runtime: 'local', cwd: localCwd(o) };
-      /** @typedef {{conversation?: () => Promise<unknown[]>, supports?: (op: string) => boolean}} ReadableRun */
+      /** @typedef {{status?: string, conversation?: () => Promise<unknown[]>, supports?: (op: string) => boolean}} ReadableRun */
       const runs = /** @type {{items?: ReadableRun[]}} */ (await Agent.listRuns(agentId, listOptions));
       const latest = runs.items?.[0];
       if (!latest || typeof latest.conversation !== 'function') return [];
+      if (latest.status === 'running') return [];
       if (typeof latest.supports === 'function' && !latest.supports('conversation')) return [];
       const turns = /** @type {ConversationTurnLike[]} */ (await latest.conversation());
       return turns.flatMap(normalizeTurn);
@@ -695,9 +766,10 @@ async function cmdCreate(opts) {
   const cwd = path.resolve(opts.cwd);
   const stateFile = opts.stateFile ? path.resolve(opts.stateFile) : undefined;
   const sdk = await loadSdk(opts, opts.dryRun);
+  const modelSelection = buildModel(opts);
 
   const createOpts = {
-    model: buildModel(opts),
+    model: cloneModelSelection(modelSelection),
     name: opts.id ? `firstmate:${opts.id}` : undefined,
     ...(opts.runtime === 'local' ? { local: { cwd } } : { cloud: {} }),
   };
@@ -710,6 +782,7 @@ async function cmdCreate(opts) {
     runtime: opts.runtime,
     cwd,
     model: opts.model,
+    model_selection: cloneModelSelection(modelSelection),
     state_file: stateFile ?? '',
     id: opts.id,
     created_at: Date.now(),
@@ -718,7 +791,15 @@ async function cmdCreate(opts) {
   await writeSession(sessionFile, record);
 
   /** @type {AgentRef} */
-  const ref = { agentId: agent.agentId, runtime: opts.runtime, cwd, model: opts.model, stateFile, id: opts.id };
+  const ref = {
+    agentId: agent.agentId,
+    runtime: opts.runtime,
+    cwd,
+    model: opts.model,
+    modelSelection: cloneModelSelection(modelSelection),
+    stateFile,
+    id: opts.id,
+  };
   /** @type {{runId:string,status:string}} */
   let firstTurn;
   try {
@@ -795,12 +876,12 @@ async function cmdKill(opts) {
 /**
  * Routing options for reattach calls (local needs cwd; cloud needs apiKey from env).
  * @param {AgentRef} ref
- * @returns {{cwd?: string, runtime: Runtime, model: string}}
+ * @returns {{cwd?: string, runtime: Runtime, model: ModelSelection}}
  */
 function refRouting(ref) {
   return ref.runtime === 'local'
-    ? { cwd: ref.cwd, runtime: 'local', model: ref.model }
-    : { runtime: 'cloud', model: ref.model };
+    ? { cwd: ref.cwd, runtime: 'local', model: cloneModelSelection(ref.modelSelection) }
+    : { runtime: 'cloud', model: cloneModelSelection(ref.modelSelection) };
 }
 
 function cmdHelp() {
@@ -823,6 +904,7 @@ function makeFakeSdk() {
    * @typedef {object} FakeStore
    * @property {string} agentId
    * @property {string} model
+   * @property {ModelSelection} model_selection
    * @property {('running'|'finished'|'error')} status
    * @property {boolean} archived
    * @property {ConversationTurnLike[]} transcript
@@ -846,16 +928,23 @@ function makeFakeSdk() {
   /** @param {FakeStore} store @returns {TranscriptTurn[]} */
   const transcriptOf = (store) => store.transcript.flatMap(normalizeTurn);
 
-  /** @param {object|undefined} opts @returns {string} */
+  /** @param {object|undefined} opts @returns {ModelSelection} */
   const createModelOf = (opts) => {
-    const route = /** @type {{model?: {id?: unknown}}} */ (opts ?? {});
-    return typeof route.model?.id === 'string' ? route.model.id : DEFAULT_MODEL;
+    const route = /** @type {{model?: unknown}} */ (opts ?? {});
+    if (typeof route.model === 'object' && route.model !== null && typeof /** @type {{id?: unknown}} */ (route.model).id === 'string') {
+      return cloneModelSelection(/** @type {ModelSelection} */ (route.model));
+    }
+    return { id: DEFAULT_MODEL };
   };
 
-  /** @param {object|undefined} opts @returns {string|undefined} */
+  /** @param {object|undefined} opts @returns {ModelSelection|undefined} */
   const resumeModelOf = (opts) => {
     const route = /** @type {{model?: unknown}} */ (opts ?? {});
-    return typeof route.model === 'string' ? route.model : undefined;
+    if (typeof route.model === 'object' && route.model !== null && typeof /** @type {{id?: unknown}} */ (route.model).id === 'string') {
+      return cloneModelSelection(/** @type {ModelSelection} */ (route.model));
+    }
+    if (typeof route.model === 'string') return { id: route.model };
+    return undefined;
   };
 
   /**
@@ -916,16 +1005,28 @@ function makeFakeSdk() {
     create: async (o) => {
       counter += 1;
       const agentId = `agent-dry-${process.pid}-${counter}`;
+      const modelSelection = createModelOf(o);
       /** @type {FakeStore} */
-      const store = { agentId, model: createModelOf(o), status: 'running', archived: false, transcript: [] };
+      const store = {
+        agentId,
+        model: modelSelection.id,
+        model_selection: cloneModelSelection(modelSelection),
+        status: 'running',
+        archived: false,
+        transcript: [],
+      };
       await save(store);
       return makeAgent(store);
     },
     resume: async (agentId, o) => {
       const store = await load(agentId);
       const model = resumeModelOf(o);
-      if (model !== store.model) {
-        runtimeError(`dry-run: resume for ${agentId} used model ${model ?? '<missing>'}, expected ${store.model}`);
+      const expected = store.model_selection ?? { id: store.model };
+      if (JSON.stringify(model) !== JSON.stringify(expected)) {
+        runtimeError(
+          `dry-run: resume for ${agentId} used model ${model ? JSON.stringify(model) : '<missing>'}, `
+            + `expected ${JSON.stringify(expected)}`,
+        );
       }
       return makeAgent(store);
     },
@@ -939,7 +1040,10 @@ function makeFakeSdk() {
         archived: store.archived,
       };
     },
-    conversationOf: async (agentId) => transcriptOf(await load(agentId)),
+    conversationOf: async (agentId) => {
+      const store = await load(agentId);
+      return store.status === 'running' ? [] : transcriptOf(store);
+    },
     cancelActiveRuns: async (agentId) => {
       const store = await load(agentId);
       if (store.status === 'running') {

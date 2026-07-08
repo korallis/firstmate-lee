@@ -131,11 +131,22 @@ test_reattach_by_agent_id() {
 
 test_send_resume_preserves_session_model() {
   local d; d=$(new_case resumemodel); use_case "$d"
-  local sf="$d/state/m.status" sess="$d/m.session.json" out model
+  local sf="$d/state/m.status" sess="$d/m.session.json" out model effort effort_param
   model="cursor-review-model"
+  effort="high"
+  effort_param="reasoning_effort"
   out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id m \
-    --model "$model" --prompt hi --session-file "$sess")
+    --model "$model" --effort "$effort" --effort-param-id "$effort_param" --prompt hi --session-file "$sess")
   [ "$(jget "$out" model)" = "$model" ] || fail "create did not report custom model: $out"
+  SESSION="$sess" MODEL="$model" EFFORT="$effort" EFFORT_PARAM="$effort_param" node -e '
+    const fs = require("node:fs");
+    const got = JSON.parse(fs.readFileSync(process.env.SESSION, "utf8"));
+    if (got.model_selection?.id !== process.env.MODEL) throw new Error("model_selection id " + got.model_selection?.id);
+    const param = got.model_selection?.params?.[0];
+    if (param?.id !== process.env.EFFORT_PARAM || param?.value !== process.env.EFFORT) {
+      throw new Error("model_selection params " + JSON.stringify(got.model_selection?.params));
+    }
+  ' || fail "session did not persist full model selection"
 
   out=$(node "$BRIDGE" send --dry-run --session "$sess" --prompt "resume with same model")
   [ "$(jget "$out" ok)" = "true" ] || fail "send with custom session model ok!=true: $out"
@@ -143,15 +154,17 @@ test_send_resume_preserves_session_model() {
   out=$(node "$BRIDGE" read --dry-run --session "$sess")
   [ "$(jget "$out" model)" = "$model" ] || fail "read lost custom session model: $out"
   assert_contains "$out" "resume with same model" "custom-model resumed send reached transcript"
-  pass "send resumes with the persisted session model"
+  pass "send resumes with the persisted session model selection"
 }
 
 test_live_resume_forwards_model_to_sdk() {
   local d; d=$(new_case livestub); use_case "$d"
   local bridge_dir="$d/bin" sdk_dir="$d/node_modules/@cursor/sdk"
   local sf="$d/state/live.status" sess="$d/live.session.json" capture="$d/resume.json"
-  local out model
+  local out model effort effort_param
   model="cursor-live-model"
+  effort="medium"
+  effort_param="reasoning_effort"
   mkdir -p "$bridge_dir" "$sdk_dir"
   cp "$BRIDGE" "$bridge_dir/fm-cursor-bridge.mjs"
   cat > "$sdk_dir/package.json" <<'JSON'
@@ -190,24 +203,85 @@ JS
       runtime: "local",
       cwd,
       model,
+      model_selection: { id: model, params: [{ id: process.argv[5], value: process.argv[6] }] },
       state_file: stateFile,
       id: "live",
       created_at: 0,
     }) + "\n");
-  ' "$sess" "$d/repo" "$model" "$sf"
+  ' "$sess" "$d/repo" "$model" "$sf" "$effort_param" "$effort"
 
   out=$(FM_CURSOR_STUB_CAPTURE="$capture" node "$bridge_dir/fm-cursor-bridge.mjs" send --session "$sess" --prompt hi)
   [ "$(jget "$out" ok)" = "true" ] || fail "live stub send ok!=true: $out"
-  CAPTURE="$capture" MODEL="$model" CWD_EXPECT="$d/repo" node -e '
+  CAPTURE="$capture" MODEL="$model" CWD_EXPECT="$d/repo" EFFORT="$effort" EFFORT_PARAM="$effort_param" node -e '
     const fs = require("node:fs");
     const got = JSON.parse(fs.readFileSync(process.env.CAPTURE, "utf8"));
     if (got.agentId !== "agent-live-stub") throw new Error("agentId " + got.agentId);
     if (got.opts?.model?.id !== process.env.MODEL) throw new Error("model " + JSON.stringify(got.opts?.model));
+    const param = got.opts?.model?.params?.[0];
+    if (param?.id !== process.env.EFFORT_PARAM || param?.value !== process.env.EFFORT) {
+      throw new Error("model params " + JSON.stringify(got.opts?.model?.params));
+    }
     if (got.opts?.local?.cwd !== process.env.CWD_EXPECT) throw new Error("cwd " + got.opts?.local?.cwd);
   ' || fail "live SDK resume did not receive model and local cwd"
   assert_grep "working: cursor local turn started" "$sf" "live stub send wrote turn-start status"
   assert_grep "working: cursor turn finished (idle)" "$sf" "live stub send wrote turn-finished status"
-  pass "live SDK resume receives the persisted model and local cwd"
+  pass "live SDK resume receives the persisted model selection and local cwd"
+}
+
+test_live_read_skips_running_conversation() {
+  local d; d=$(new_case readrunning); use_case "$d"
+  local bridge_dir="$d/bin" sdk_dir="$d/node_modules/@cursor/sdk"
+  local sess="$d/running.session.json" marker="$d/conversation.called" out model
+  model="cursor-read-model"
+  mkdir -p "$bridge_dir" "$sdk_dir"
+  cp "$BRIDGE" "$bridge_dir/fm-cursor-bridge.mjs"
+  cat > "$sdk_dir/package.json" <<'JSON'
+{"type":"module","main":"index.js"}
+JSON
+  cat > "$sdk_dir/index.js" <<'JS'
+import { writeFile } from "node:fs/promises";
+
+export const Agent = {
+  async get(agentId) {
+    return { agentId, status: "running", archived: false, summary: "active run" };
+  },
+  async listRuns() {
+    return {
+      items: [{
+        id: "run-active",
+        status: "running",
+        supports: (op) => op === "conversation",
+        async conversation() {
+          await writeFile(process.env.FM_CURSOR_STUB_CONVERSATION_CALLED, "called\n");
+          throw new Error("conversation should not be called for running runs");
+        },
+      }],
+    };
+  },
+};
+JS
+  node -e '
+    const fs = require("node:fs");
+    const [file, cwd, model] = process.argv.slice(1);
+    fs.writeFileSync(file, JSON.stringify({
+      schema: "fm-cursor-bridge/session@1",
+      agent_id: "agent-read-stub",
+      runtime: "local",
+      cwd,
+      model,
+      model_selection: { id: model },
+      state_file: "",
+      id: "read",
+      created_at: 0,
+    }) + "\n");
+  ' "$sess" "$d/repo" "$model"
+
+  out=$(FM_CURSOR_STUB_CONVERSATION_CALLED="$marker" node "$bridge_dir/fm-cursor-bridge.mjs" read --session "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "live running read ok!=true: $out"
+  [ "$(jget "$out" status)" = "running" ] || fail "live running read status!=running: $out"
+  [ "$(jget "$out" transcript)" = "0" ] || fail "live running read should not collect transcript: $out"
+  assert_absent "$marker" "read should not call conversation() for a running run"
+  pass "live read skips conversation collection for running runs"
 }
 
 # create without a prompt is a usage error in this phase.
@@ -373,6 +447,7 @@ test_lifecycle_end_to_end
 test_reattach_by_agent_id
 test_send_resume_preserves_session_model
 test_live_resume_forwards_model_to_sdk
+test_live_read_skips_running_conversation
 test_create_requires_prompt
 test_cloud_runtime_is_a_flag
 test_request_event_does_not_override_terminal_status
