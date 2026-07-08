@@ -512,6 +512,55 @@ test_run_rejection_writes_failed_status() {
   pass "stream/wait rejections append failed status before returning an error"
 }
 
+test_terminal_run_status_returns_failure() {
+  local d; d=$(new_case terminalerror); use_case "$d"
+  local sf="$d/state/e.status" sess="$d/e.session.json" out rc
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id e \
+    --prompt "__fm_cursor_fake_terminal_error__" --session-file "$sess" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "terminal error exits 1"
+  [ "$(jget "$out" ok)" = "false" ] || fail "terminal error ok!=false: $out"
+  assert_contains "$out" "dry-run terminal error" "terminal error reported in JSON"
+  assert_grep "working: cursor local turn started" "$sf" "terminal error wrote turn-start status"
+  assert_grep "failed: dry-run terminal error" "$sf" "terminal error wrote failed status"
+
+  d=$(new_case terminalcancel); use_case "$d"
+  sf="$d/state/c.status"; sess="$d/c.session.json"
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id c \
+    --prompt "setup" --session-file "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "terminal cancel setup create ok!=true: $out"
+  out=$(node "$BRIDGE" send --dry-run --session "$sess" \
+    --prompt "__fm_cursor_fake_terminal_cancelled__" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "terminal cancel send exits 1"
+  [ "$(jget "$out" ok)" = "false" ] || fail "terminal cancel ok!=false: $out"
+  [ "$(jget "$out" verb)" = "send" ] || fail "terminal cancel verb!=send: $out"
+  assert_contains "$out" "cursor run cancelled" "terminal cancel reported in JSON"
+  assert_grep "failed: cursor run cancelled" "$sf" "terminal cancel wrote failed status"
+  pass "terminal error/cancel statuses return failure JSON and status"
+}
+
+test_send_startup_failure_writes_failed_status() {
+  local d; d=$(new_case createsendfail); use_case "$d"
+  local sf="$d/state/cs.status" sess="$d/cs.session.json" out rc
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id cs \
+    --prompt "__fm_cursor_fake_send_failure__" --session-file "$sess" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "create send failure exits 1"
+  [ "$(jget "$out" ok)" = "false" ] || fail "create send failure ok!=false: $out"
+  [ "$(tail -n 1 "$sf")" = "failed: dry-run send failure" ] || fail "create send failure did not end with failed status"
+
+  d=$(new_case sendsendfail); use_case "$d"
+  sf="$d/state/ss.status"; sess="$d/ss.session.json"
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id ss \
+    --prompt "setup" --session-file "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "send failure setup create ok!=true: $out"
+  out=$(node "$BRIDGE" send --dry-run --session "$sess" \
+    --prompt "__fm_cursor_fake_send_failure__" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "send startup failure exits 1"
+  [ "$(jget "$out" ok)" = "false" ] || fail "send startup failure ok!=false: $out"
+  [ "$(jget "$out" verb)" = "send" ] || fail "send startup failure verb!=send: $out"
+  [ "$(tail -n 1 "$sf")" = "failed: dry-run send failure" ] || fail "send startup failure did not end with failed status"
+  pass "local send startup failures append failed status"
+}
+
 test_kill_delete_returns_stable_shape() {
   local d; d=$(new_case deletekill); use_case "$d"
   local sf="$d/state/d.status" sess="$d/d.session.json" out
@@ -603,6 +652,8 @@ test_request_event_does_not_override_terminal_status
 test_kill_cancels_active_run_before_archive
 test_live_kill_pages_to_cancel_latest_active_run
 test_run_rejection_writes_failed_status
+test_terminal_run_status_returns_failure
+test_send_startup_failure_writes_failed_status
 test_kill_delete_returns_stable_shape
 test_no_verb_is_usage_error
 test_unknown_verb_is_usage_error

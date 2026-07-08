@@ -741,6 +741,12 @@ function normalizeTurn(turn) {
 
 // --- turn execution + status mapping ----------------------------------------
 
+/** @param {SdkRunResult} result @returns {string} */
+function terminalRunFailureMessage(result) {
+  if (result.status === 'cancelled') return 'cursor run cancelled';
+  return result.error?.message ?? 'cursor run error';
+}
+
 /**
  * Run one turn, streaming events and appending sparse status lines for the
  * local runtime. Returns the terminal run status and final assistant text.
@@ -752,11 +758,13 @@ function normalizeTurn(turn) {
 async function runTurn(agent, message, ref) {
   const isLocal = ref.runtime === 'local';
   const stateFile = 'stateFile' in ref ? ref.stateFile : undefined;
-  const run = await agent.send(message);
-  if (isLocal) await appendStatus(stateFile, `working: cursor ${ref.runtime} turn started`);
-
   let assistantText = '';
+  /** @type {SdkRunResult} */
+  let result;
   try {
+    const run = await agent.send(message);
+    if (isLocal) await appendStatus(stateFile, `working: cursor ${ref.runtime} turn started`);
+
     for await (const ev of run.stream()) {
       if (ev.type === 'assistant' && ev.message?.content) {
         for (const block of ev.message.content) {
@@ -765,21 +773,20 @@ async function runTurn(agent, message, ref) {
       }
     }
 
-    const result = await run.wait();
-    if (isLocal) {
-      if (result.status === 'error') {
-        await appendStatus(stateFile, `failed: ${result.error?.message ?? 'cursor run error'}`);
-      } else if (result.status === 'cancelled') {
-        await appendStatus(stateFile, 'failed: cursor run cancelled');
-      } else if (result.status === 'finished') {
-        await appendStatus(stateFile, 'working: cursor turn finished (idle)');
-      }
-    }
-    return { runId: result.id, status: result.status, text: result.result ?? assistantText };
+    result = await run.wait();
   } catch (err) {
     if (isLocal) await appendStatus(stateFile, `failed: ${errorMessage(err)}`);
     throw err;
   }
+  if (isLocal) {
+    if (result.status === 'finished') {
+      await appendStatus(stateFile, 'working: cursor turn finished (idle)');
+    } else {
+      await appendStatus(stateFile, `failed: ${terminalRunFailureMessage(result)}`);
+    }
+  }
+  if (result.status !== 'finished') runtimeError(terminalRunFailureMessage(result));
+  return { runId: result.id, status: result.status, text: result.result ?? assistantText };
 }
 
 // --- verb handlers ----------------------------------------------------------
@@ -1005,6 +1012,16 @@ function makeFakeSdk() {
         if (message === '__fm_cursor_fake_wait_failure__') {
           throw new Error('dry-run wait failure');
         }
+        if (message === '__fm_cursor_fake_terminal_error__') {
+          store.status = 'error';
+          await save(store);
+          return { id: runId, status: 'error', error: { message: 'dry-run terminal error' } };
+        }
+        if (message === '__fm_cursor_fake_terminal_cancelled__') {
+          store.status = 'finished';
+          await save(store);
+          return { id: runId, status: 'cancelled' };
+        }
         store.transcript.push({
           type: 'agentConversationTurn',
           turn: {
@@ -1026,7 +1043,10 @@ function makeFakeSdk() {
   /** @param {FakeStore} store @returns {SdkAgent} */
   const makeAgent = (store) => ({
     agentId: store.agentId,
-    send: async (message) => makeRun(store, message),
+    send: async (message) => {
+      if (message === '__fm_cursor_fake_send_failure__') throw new Error('dry-run send failure');
+      return makeRun(store, message);
+    },
     close: () => {},
   });
 
