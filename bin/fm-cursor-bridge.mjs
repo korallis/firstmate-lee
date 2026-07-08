@@ -58,7 +58,7 @@
 //
 // send    Send a prompt or steer line to an existing agent (a new run).
 //   Reattach: --session <path>   (preferred), OR
-//             --agent-id <id> --cwd <dir> [--state-file <path>] [--runtime ..].
+//             --agent-id <id> --cwd <dir> [--state-file <path>] [--runtime ..] [--model <id>].
 //   Required: --prompt <text> | --prompt-file <path>.
 //   Prints:  {"ok":true,"agent_id":"...","run_id":"...","status":"finished"}
 //
@@ -541,10 +541,13 @@ async function loadSdk(opts, dryRun) {
   const opOptions = (o) => (isCloud(o) ? {} : { cwd: localCwd(o) });
   /**
    * Options for resume: cwd is nested under `local` (Partial<AgentOptions>).
-   * @param {{cwd?: string, runtime?: Runtime}} [o]
-   * @returns {{local?: {cwd?: string}}}
+   * @param {{cwd?: string, runtime?: Runtime, model?: string}} [o]
+   * @returns {{model: ModelSelection, local?: {cwd?: string}}}
    */
-  const resumeOptions = (o) => (isCloud(o) ? {} : { local: { cwd: localCwd(o) } });
+  const resumeOptions = (o) => {
+    const model = { id: o?.model ?? opts.model };
+    return isCloud(o) ? { model } : { model, local: { cwd: localCwd(o) } };
+  };
 
   return {
     create: (o) => /** @type {Promise<SdkAgent>} */ (Agent.create(o)),
@@ -792,10 +795,12 @@ async function cmdKill(opts) {
 /**
  * Routing options for reattach calls (local needs cwd; cloud needs apiKey from env).
  * @param {AgentRef} ref
- * @returns {{cwd?: string, runtime: Runtime}}
+ * @returns {{cwd?: string, runtime: Runtime, model: string}}
  */
 function refRouting(ref) {
-  return ref.runtime === 'local' ? { cwd: ref.cwd, runtime: 'local' } : { runtime: 'cloud' };
+  return ref.runtime === 'local'
+    ? { cwd: ref.cwd, runtime: 'local', model: ref.model }
+    : { runtime: 'cloud', model: ref.model };
 }
 
 function cmdHelp() {
@@ -840,6 +845,18 @@ function makeFakeSdk() {
 
   /** @param {FakeStore} store @returns {TranscriptTurn[]} */
   const transcriptOf = (store) => store.transcript.flatMap(normalizeTurn);
+
+  /** @param {object|undefined} opts @returns {string} */
+  const createModelOf = (opts) => {
+    const route = /** @type {{model?: {id?: unknown}}} */ (opts ?? {});
+    return typeof route.model?.id === 'string' ? route.model.id : DEFAULT_MODEL;
+  };
+
+  /** @param {object|undefined} opts @returns {string|undefined} */
+  const resumeModelOf = (opts) => {
+    const route = /** @type {{model?: unknown}} */ (opts ?? {});
+    return typeof route.model === 'string' ? route.model : undefined;
+  };
 
   /**
    * @param {FakeStore} store
@@ -896,15 +913,22 @@ function makeFakeSdk() {
   });
 
   return {
-    create: async () => {
+    create: async (o) => {
       counter += 1;
       const agentId = `agent-dry-${process.pid}-${counter}`;
       /** @type {FakeStore} */
-      const store = { agentId, model: DEFAULT_MODEL, status: 'running', archived: false, transcript: [] };
+      const store = { agentId, model: createModelOf(o), status: 'running', archived: false, transcript: [] };
       await save(store);
       return makeAgent(store);
     },
-    resume: async (agentId) => makeAgent(await load(agentId)),
+    resume: async (agentId, o) => {
+      const store = await load(agentId);
+      const model = resumeModelOf(o);
+      if (model !== store.model) {
+        runtimeError(`dry-run: resume for ${agentId} used model ${model ?? '<missing>'}, expected ${store.model}`);
+      }
+      return makeAgent(store);
+    },
     get: async (agentId) => {
       const store = await load(agentId);
       const transcript = transcriptOf(store);
