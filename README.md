@@ -115,6 +115,7 @@ It routes each request to a crewmate in its own session endpoint and git worktre
 Optional secondmates extend this to persistent domain supervisors, dispatch profiles let you steer which harness handles which task, and an opt-in X mode lets the same fleet answer public mentions.
 The optional Cursor MCP server lets Cursor's native chat and agents panel read the same live fleet state, with `steer_task` as its only mutating tool.
 `codex-app` is not a runtime backend yet; [docs/codex-app-backend.md](docs/codex-app-backend.md) owns the Codex App boundary.
+The Cursor SDK bridge exists as a shell-callable Track T2 transport, but `cursor-sdk` is not selectable until its backend adapter lands; [docs/cursor-sdk-backend.md](docs/cursor-sdk-backend.md) owns that contract.
 
 Full architecture - the supervision engine, worktree isolation, secondmates, dispatch profiles, project modes, the optional MCP and X surfaces, fleet sync, and self-update - is in [docs/architecture.md](docs/architecture.md).
 
@@ -154,6 +155,7 @@ Firstmate's skills live in two separate places with different audiences:
 - [docs/orca-backend.md](docs/orca-backend.md) - setup guide for the experimental Orca backend, plus its lifecycle notes and known gaps.
 - [docs/cmux-backend.md](docs/cmux-backend.md) - setup guide for the experimental cmux backend, plus its verification notes and known gaps.
 - [docs/codex-app-backend.md](docs/codex-app-backend.md) - Codex App backend boundary, evidence, and rollout contract.
+- [docs/cursor-sdk-backend.md](docs/cursor-sdk-backend.md) - Cursor SDK bridge contract, dependency note, and dry-run verification for the future backend adapter.
 - [docs/turnend-guard.md](docs/turnend-guard.md) - the primary session's structural "no turn ends blind" backstop: verified per-harness hook mechanisms, scoping, loop safety, and fail-open tradeoffs.
 - [docs/scripts.md](docs/scripts.md) - the `bin/` toolbelt reference.
 - [.cursor-plugin/README.md](.cursor-plugin/README.md) - Cursor Customize plugin packaging and the C0 integration boundary.

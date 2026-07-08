@@ -51,8 +51,10 @@
 //             --runtime local|cloud  Default "local".
 //             --session-file <path>  Where to persist reattach info; default
 //                                    "<state-file-dir>/<id-or-agent>.session.json".
-//   Prints:  {"ok":true,"agent_id":"agent-...","session_ref":"<path>",
-//             "runtime":"local","model":"composer-2.5"}
+//   Prints:  {"ok":true,"verb":"create","agent_id":"agent-...",
+//             "session_ref":"<path>","runtime":"local",
+//             "model":"composer-2.5","first_run_id":"run-...",
+//             "first_run_status":"finished"}
 //   Persists a session JSON at session_ref holding agent_id, runtime, cwd,
 //   model, model_selection, state_file and id - enough for send/read/kill to
 //   reattach later.
@@ -61,19 +63,22 @@
 //   Reattach: --session <path>   (preferred), OR
 //             --agent-id <id> --cwd <dir> [--state-file <path>] [--runtime ..] [--model <id>].
 //   Required: --prompt <text> | --prompt-file <path>.
-//   Prints:  {"ok":true,"agent_id":"...","run_id":"...","status":"finished"}
+//   Prints:  {"ok":true,"verb":"send","agent_id":"...","run_id":"...",
+//             "status":"finished"}
 //
 // read    Return current transcript/state as JSON (for fm-peek / fm-crew-state).
 //   Reattach: --session <path>, OR --agent-id <id> --cwd <dir>.
 //   Optional: --limit <n>   Cap transcript turns returned (default 40).
-//   Prints:  {"ok":true,"agent_id":"...","runtime":"local","status":"...",
-//             "model":"...","summary":"...","last_status_line":"...",
+//   Prints:  {"ok":true,"verb":"read","agent_id":"...","runtime":"local",
+//             "status":"...","archived":false,"model":"...","summary":"...",
+//             "last_status_line":"...",
 //             "transcript":[{"role":"assistant","text":"..."}, ...]}
 //
 // kill    Cancel any active run and archive/stop the agent.
 //   Reattach: --session <path>, OR --agent-id <id> --cwd <dir>.
 //   Optional: --delete   Permanently delete instead of archiving.
-//   Prints:  {"ok":true,"agent_id":"...","archived":true,"deleted":false}
+//   Prints:  {"ok":true,"verb":"kill","agent_id":"...","archived":true,
+//             "deleted":false}
 //
 // --help  Print this contract to stdout and exit 0.
 //
@@ -1130,13 +1135,17 @@ function extractHeaderContract() {
     '  create  Start an agent. Required: --cwd <dir>; --state-file <path> for',
     '          --runtime local; --prompt/--prompt-file. Optional: --id, --model',
     `          (default ${DEFAULT_MODEL}), --effort, --runtime local|cloud,`,
-    '          --session-file. Prints {agent_id, session_ref}.',
+    '          --session-file. Prints {ok, verb, agent_id, session_ref,',
+    '          first_run_id, first_run_status}.',
     '  send    Send a prompt/steer line. Reattach via --session <path> or',
     '          --agent-id <id> --cwd <dir>. Required: --prompt/--prompt-file.',
-    '          Prints {ok, agent_id, run_id, status}.',
+    '          Prints {ok, verb, agent_id, run_id, status}.',
     '  read    Return transcript/state as JSON (for fm-peek/fm-crew-state).',
     '          Reattach via --session or --agent-id --cwd. Optional --limit.',
+    '          Prints {ok, verb, agent_id, runtime, status, archived, model,',
+    '          summary, last_status_line, transcript}.',
     '  kill    Cancel/archive the agent (--delete to remove permanently).',
+    '          Prints {ok, verb, agent_id, archived, deleted}.',
     '',
     'Global:',
     '  --dry-run            Offline deterministic fake SDK (no @cursor/sdk, no',

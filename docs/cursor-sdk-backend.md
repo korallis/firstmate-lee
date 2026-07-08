@@ -17,10 +17,10 @@ A caller parses stdout as JSON and branches on `ok`; it never screen-scrapes pro
 
 | Verb | Purpose | Key flags | Prints |
 | --- | --- | --- | --- |
-| `create` | Start an agent and run its first turn | `--cwd`, `--state-file` (local), `--prompt`/`--prompt-file`, `--id`, `--model`, `--effort`, `--runtime`, `--session-file` | `{ok, agent_id, session_ref, runtime, model}` |
-| `send` | Send a prompt or steer line as a new run | `--session` or `--agent-id`+`--cwd`, `--model` for agent-id reattach to non-default models, `--prompt`/`--prompt-file` | `{ok, agent_id, run_id, status}` |
-| `read` | Return transcript/state for `fm-peek` / `fm-crew-state` | `--session` or `--agent-id`+`--cwd`, `--limit` | `{ok, agent_id, runtime, status, archived, model, summary, last_status_line, transcript[]}` |
-| `kill` | Cancel any active run and archive (or `--delete`) the agent | `--session` or `--agent-id`+`--cwd`, `--delete` | `{ok, agent_id, archived, deleted}` |
+| `create` | Start an agent and run its first turn | `--cwd`, `--state-file` (local), `--prompt`/`--prompt-file`, `--id`, `--model`, `--effort`, `--runtime`, `--session-file` | `{ok, verb, agent_id, session_ref, runtime, model, first_run_id, first_run_status}` |
+| `send` | Send a prompt or steer line as a new run | `--session` or `--agent-id`+`--cwd`, `--model` for agent-id reattach to non-default models, `--prompt`/`--prompt-file` | `{ok, verb, agent_id, run_id, status}` |
+| `read` | Return transcript/state for `fm-peek` / `fm-crew-state` | `--session` or `--agent-id`+`--cwd`, `--limit` | `{ok, verb, agent_id, runtime, status, archived, model, summary, last_status_line, transcript[]}` |
+| `kill` | Cancel any active run and archive (or `--delete`) the agent | `--session` or `--agent-id`+`--cwd`, `--delete` | `{ok, verb, agent_id, archived, deleted}` |
 
 `create` persists a session JSON at `session_ref` holding `agent_id`, `runtime`, `cwd`, `model`, `model_selection`, `state_file`, and `id`.
 That file is enough for `send`, `read`, and `kill` to reattach to the same agent from a fresh process, mirroring `@cursor/sdk`'s durable-agent flow (`Agent.resume(agentId)` after the local process restarted).
@@ -82,7 +82,7 @@ $ node bin/fm-cursor-bridge.mjs send --dry-run --session <sess> --prompt "also a
 {"ok":true,"verb":"send","agent_id":"agent-dry-...","run_id":"run-dry-...","status":"finished"}
 
 $ node bin/fm-cursor-bridge.mjs read --dry-run --session <sess>
-{"ok":true,"verb":"read","agent_id":"agent-dry-...","runtime":"local","status":"finished","archived":false,"model":"composer-2.5","summary":"...","last_status_line":"working: cursor turn finished (idle)","transcript":[{"role":"user","text":"also add tests"},{"role":"assistant","text":"..."}]}
+{"ok":true,"verb":"read","agent_id":"agent-dry-...","runtime":"local","status":"finished","archived":false,"model":"composer-2.5","summary":"...","last_status_line":"working: cursor turn finished (idle)","transcript":[{"role":"user","text":"build the thing"},{"role":"assistant","text":"..."},{"role":"user","text":"also add tests"},{"role":"assistant","text":"..."}]}
 
 $ node bin/fm-cursor-bridge.mjs kill --dry-run --session <sess>
 {"ok":true,"verb":"kill","agent_id":"agent-dry-...","archived":true,"deleted":false}
@@ -90,6 +90,8 @@ $ node bin/fm-cursor-bridge.mjs kill --dry-run --session <sess>
 $ cat <state>/demo.status
 working: cursor local turn started
 working: cursor turn finished (idle)
+working: cursor local turn started
+working: cursor turn finished (idle)
 ```
 
-`tests/fm-cursor-bridge.test.sh` pins this contract (19 cases: the four verbs end to end, reattach by session and by agent-id, resumed sends preserving the session model selection, live resume option forwarding through a local SDK stub, live read skipping conversation collection for running runs, prompt-required create, cloud-runtime flag parity, request-event status behavior, kill cancellation, stream/wait failure status writes, stable kill shape, the usage-error exit codes, the status-file writes, and the clean live-path failure when `@cursor/sdk` is absent).
+`tests/fm-cursor-bridge.test.sh` pins this contract (23 cases: help output, the four verbs end to end, reattach by session and by agent-id, resumed sends preserving the session model selection, live resume option forwarding through a local SDK stub, live read skipping conversation collection for running runs and using the newest listed run, prompt/cwd/state-file requirements, missing reattach handling, cloud-runtime flag parity, request-event status behavior, kill cancellation and paged active-run cancellation, stream/wait/startup failure status writes, stable kill shapes, usage-error exit codes, unknown flag handling, and the clean live-path failure when `@cursor/sdk` is absent).
