@@ -165,12 +165,20 @@ test_request_event_does_not_override_terminal_status() {
 
 test_kill_cancels_active_run_before_archive() {
   local d; d=$(new_case cancelkill); use_case "$d"
-  local sf="$d/state/k.status" sess="$d/k.session.json" out
+  local sf="$d/state/k.status" sess="$d/k.session.json" out agent_id
   out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id k \
-    --prompt "keep running" --session-file "$sess" --no-wait)
-  [ "$(jget "$out" ok)" = "true" ] || fail "no-wait create ok!=true: $out"
+    --prompt "keep running" --session-file "$sess")
+  [ "$(jget "$out" ok)" = "true" ] || fail "active-run setup create ok!=true: $out"
+  agent_id=$(jget "$out" agent_id)
+  node -e '
+    const fs = require("node:fs");
+    const file = process.argv[1];
+    const store = JSON.parse(fs.readFileSync(file, "utf8"));
+    store.status = "running";
+    fs.writeFileSync(file, JSON.stringify(store) + "\n");
+  ' "$d/store/.$agent_id.dryrun.json"
   out=$(node "$BRIDGE" read --dry-run --session "$sess")
-  [ "$(jget "$out" status)" = "running" ] || fail "no-wait create should leave a running fake run: $out"
+  [ "$(jget "$out" status)" = "running" ] || fail "active-run setup should leave a running fake run: $out"
   out=$(node "$BRIDGE" kill --dry-run --session "$sess")
   [ "$(jget "$out" archived)" = "true" ] || fail "kill archived!=true: $out"
   [ "$(jget "$out" deleted)" = "false" ] || fail "kill deleted!=false: $out"
@@ -178,6 +186,27 @@ test_kill_cancels_active_run_before_archive() {
   [ "$(jget "$out" status)" = "finished" ] || fail "kill should cancel active run before archive: $out"
   [ "$(jget "$out" archived)" = "true" ] || fail "kill should still archive after cancel: $out"
   pass "kill cancels an active run before archiving"
+}
+
+test_run_rejection_writes_failed_status() {
+  local d; d=$(new_case streamfail); use_case "$d"
+  local sf="$d/state/s.status" sess="$d/s.session.json" out rc
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id s \
+    --prompt "__fm_cursor_fake_stream_failure__" --session-file "$sess" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "stream failure exits 1"
+  [ "$(jget "$out" ok)" = "false" ] || fail "stream failure ok!=false: $out"
+  assert_grep "working: cursor local turn started" "$sf" "stream failure wrote turn-start status"
+  assert_grep "failed: dry-run stream failure" "$sf" "stream failure wrote failed status"
+
+  d=$(new_case waitfail); use_case "$d"
+  sf="$d/state/w.status"; sess="$d/w.session.json"
+  out=$(node "$BRIDGE" create --dry-run --cwd "$d/repo" --state-file "$sf" --id w \
+    --prompt "__fm_cursor_fake_wait_failure__" --session-file "$sess" 2>/dev/null); rc=$?
+  expect_code 1 "$rc" "wait failure exits 1"
+  [ "$(jget "$out" ok)" = "false" ] || fail "wait failure ok!=false: $out"
+  assert_grep "working: cursor local turn started" "$sf" "wait failure wrote turn-start status"
+  assert_grep "failed: dry-run wait failure" "$sf" "wait failure wrote failed status"
+  pass "stream/wait rejections append failed status before returning an error"
 }
 
 test_kill_delete_returns_stable_shape() {
@@ -265,6 +294,7 @@ test_create_requires_prompt
 test_cloud_runtime_is_a_flag
 test_request_event_does_not_override_terminal_status
 test_kill_cancels_active_run_before_archive
+test_run_rejection_writes_failed_status
 test_kill_delete_returns_stable_shape
 test_no_verb_is_usage_error
 test_unknown_verb_is_usage_error

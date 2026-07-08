@@ -51,7 +51,6 @@
 //             --runtime local|cloud  Default "local".
 //             --session-file <path>  Where to persist reattach info; default
 //                                    "<state-file-dir>/<id-or-agent>.session.json".
-//             --no-wait              Do not wait for the first turn to finish.
 //   Prints:  {"ok":true,"agent_id":"agent-...","session_ref":"<path>",
 //             "runtime":"local","model":"composer-2.5"}
 //   Persists a session JSON at session_ref holding agent_id, runtime, cwd,
@@ -61,7 +60,6 @@
 //   Reattach: --session <path>   (preferred), OR
 //             --agent-id <id> --cwd <dir> [--state-file <path>] [--runtime ..].
 //   Required: --prompt <text> | --prompt-file <path>.
-//   Optional: --no-wait.
 //   Prints:  {"ok":true,"agent_id":"...","run_id":"...","status":"finished"}
 //
 // read    Return current transcript/state as JSON (for fm-peek / fm-crew-state).
@@ -128,7 +126,6 @@ const SESSION_SCHEMA = 'fm-cursor-bridge/session@1';
  * @property {string|undefined} sessionFile
  * @property {string|undefined} session
  * @property {string|undefined} agentId
- * @property {boolean} wait
  * @property {boolean} dryRun
  * @property {boolean} deleteAgent
  * @property {number} limit
@@ -257,6 +254,11 @@ function runtimeError(message) {
   throw new CliError(message, 1);
 }
 
+/** @param {unknown} err @returns {string} */
+function errorMessage(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+
 /**
  * Append one firstmate status line to a state file, creating parent dirs.
  * Sparse by design: each append wakes firstmate.
@@ -287,12 +289,12 @@ async function lastStatusLine(stateFile) {
 
 // --- argument parsing -------------------------------------------------------
 
-const FLAG_KEYS = new Set(['--dry-run', '--no-wait', '--delete', '--help', '-h']);
+const FLAG_KEYS = new Set(['--dry-run', '--delete', '--help', '-h']);
 
 // Every recognized flag. An unrecognized `--flag` is a usage error so a typo
 // never silently changes behavior.
 const KNOWN_FLAGS = new Set([
-  '--dry-run', '--no-wait', '--delete', '--help', '-h',
+  '--dry-run', '--delete', '--help', '-h',
   '--cwd', '--state-file', '--id', '--prompt', '--prompt-file', '--model',
   '--effort', '--effort-param-id', '--runtime', '--session-file', '--session',
   '--agent-id', '--limit',
@@ -363,7 +365,6 @@ function parseArgs(argv) {
     sessionFile: str('--session-file'),
     session: str('--session'),
     agentId: str('--agent-id'),
-    wait: raw['--no-wait'] !== true,
     dryRun: raw['--dry-run'] === true || process.env.FM_CURSOR_BRIDGE_DRY_RUN === '1',
     deleteAgent: raw['--delete'] === true,
     limit: Math.floor(limitRaw),
@@ -652,25 +653,30 @@ async function runTurn(agent, message, ref) {
   if (isLocal) await appendStatus(stateFile, `working: cursor ${ref.runtime} turn started`);
 
   let assistantText = '';
-  for await (const ev of run.stream()) {
-    if (ev.type === 'assistant' && ev.message?.content) {
-      for (const block of ev.message.content) {
-        if (block.type === 'text' && typeof block.text === 'string') assistantText += block.text;
+  try {
+    for await (const ev of run.stream()) {
+      if (ev.type === 'assistant' && ev.message?.content) {
+        for (const block of ev.message.content) {
+          if (block.type === 'text' && typeof block.text === 'string') assistantText += block.text;
+        }
       }
     }
-  }
 
-  const result = await run.wait();
-  if (isLocal) {
-    if (result.status === 'error') {
-      await appendStatus(stateFile, `failed: ${result.error?.message ?? 'cursor run error'}`);
-    } else if (result.status === 'cancelled') {
-      await appendStatus(stateFile, 'failed: cursor run cancelled');
-    } else if (result.status === 'finished') {
-      await appendStatus(stateFile, 'working: cursor turn finished (idle)');
+    const result = await run.wait();
+    if (isLocal) {
+      if (result.status === 'error') {
+        await appendStatus(stateFile, `failed: ${result.error?.message ?? 'cursor run error'}`);
+      } else if (result.status === 'cancelled') {
+        await appendStatus(stateFile, 'failed: cursor run cancelled');
+      } else if (result.status === 'finished') {
+        await appendStatus(stateFile, 'working: cursor turn finished (idle)');
+      }
     }
+    return { runId: result.id, status: result.status, text: result.result ?? assistantText };
+  } catch (err) {
+    if (isLocal) await appendStatus(stateFile, `failed: ${errorMessage(err)}`);
+    throw err;
   }
-  return { runId: result.id, status: result.status, text: result.result ?? assistantText };
 }
 
 // --- verb handlers ----------------------------------------------------------
@@ -708,18 +714,16 @@ async function cmdCreate(opts) {
   const sessionFile = defaultSessionPath(opts, agent.agentId);
   await writeSession(sessionFile, record);
 
-  /** @type {{runId:string,status:string}|undefined} */
-  let firstTurn;
   /** @type {AgentRef} */
   const ref = { agentId: agent.agentId, runtime: opts.runtime, cwd, model: opts.model, stateFile, id: opts.id };
-  if (opts.wait) {
+  /** @type {{runId:string,status:string}} */
+  let firstTurn;
+  try {
     const t = await runTurn(agent, prompt, ref);
     firstTurn = { runId: t.runId, status: t.status };
-  } else {
-    // Fire the turn but do not await completion.
-    void agent.send(prompt);
+  } finally {
+    agent.close();
   }
-  agent.close();
 
   printJson({
     ok: true,
@@ -728,7 +732,8 @@ async function cmdCreate(opts) {
     session_ref: sessionFile,
     runtime: opts.runtime,
     model: opts.model,
-    ...(firstTurn ? { first_run_id: firstTurn.runId, first_run_status: firstTurn.status } : {}),
+    first_run_id: firstTurn.runId,
+    first_run_status: firstTurn.status,
   });
 }
 
@@ -740,15 +745,12 @@ async function cmdSend(opts) {
   const sdk = await loadSdk(ref, opts.dryRun);
   const agent = await sdk.resume(ref.agentId, refRouting(ref));
 
-  if (opts.wait) {
+  try {
     const t = await runTurn(agent, prompt, ref);
-    agent.close();
     printJson({ ok: true, verb: 'send', agent_id: ref.agentId, run_id: t.runId, status: t.status });
-    return;
+  } finally {
+    agent.close();
   }
-  const run = await agent.send(prompt);
-  agent.close();
-  printJson({ ok: true, verb: 'send', agent_id: ref.agentId, run_id: run.id, status: run.status });
 }
 
 /** @param {CliOptions} opts */
@@ -859,9 +861,15 @@ function makeFakeSdk() {
       id: runId,
       status: 'finished',
       stream: async function* streamEvents() {
+        if (message === '__fm_cursor_fake_stream_failure__') {
+          throw new Error('dry-run stream failure');
+        }
         for (const ev of events) yield ev;
       },
       wait: async () => {
+        if (message === '__fm_cursor_fake_wait_failure__') {
+          throw new Error('dry-run wait failure');
+        }
         store.transcript.push({
           type: 'agentConversationTurn',
           turn: {
@@ -945,7 +953,7 @@ function extractHeaderContract() {
     '  create  Start an agent. Required: --cwd <dir>; --state-file <path> for',
     '          --runtime local; --prompt/--prompt-file. Optional: --id, --model',
     `          (default ${DEFAULT_MODEL}), --effort, --runtime local|cloud,`,
-    '          --session-file, --no-wait. Prints {agent_id, session_ref}.',
+    '          --session-file. Prints {agent_id, session_ref}.',
     '  send    Send a prompt/steer line. Reattach via --session <path> or',
     '          --agent-id <id> --cwd <dir>. Required: --prompt/--prompt-file.',
     '          Prints {ok, agent_id, run_id, status}.',
@@ -1000,7 +1008,7 @@ async function main() {
     await dispatch(verb, parsed.opts);
   } catch (err) {
     const code = err instanceof CliError ? err.code : 1;
-    const message = err instanceof Error ? err.message : String(err);
+    const message = errorMessage(err);
     printJson({ ok: false, verb: verb || undefined, error: message });
     process.exitCode = code;
   }
